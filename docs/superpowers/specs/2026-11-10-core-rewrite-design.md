@@ -373,10 +373,12 @@ Decided while building. Where these differ from the text above, these win.
   special cases and still left watched and unwatched computeds disagreeing.
   `Computed._refresh` follows the reference order with no exceptions.
 - Effect order is narrower than "creation order". When a signal is written, the
-  effects that read it directly run in the order they subscribed. Order is otherwise
-  unspecified: across effects that reach the signal through different computeds, and
-  across several writes before one flush. Strict creation order would cost a field per effect and a
-  sort per flush pass.
+  effects that read it only directly run in the order they subscribed to it. Order is
+  otherwise unspecified: for effects that reach the signal through a computed, and
+  across several writes before one flush. An effect that reaches the signal through a
+  computed is queued when that computed is notified, so it can run after an effect
+  that subscribed to the signal later. Strict creation order would cost a field per
+  effect and a sort per flush pass.
 - `flush()` does nothing while a Watcher notify callback is running. The write that
   triggered the callback asks the scheduler again afterwards.
 - A scheduler that throws does not stop later flushes: the request flag is reset and
@@ -406,9 +408,5 @@ Decided while building. Where these differ from the text above, these win.
 - A `watched` or `unwatched` hook that throws leaves the graph in an undefined state.
   The README documents this; the core does not contain it. A `null` hook is ignored.
 - The public `State`, `Computed` and `Watcher` interfaces carry type-only brands, so
-  they are nominal: a State does not type-check as a Computed, as a sink, or as a
-  Watcher argument. The brands add nothing to `dist/index.js`.
-- The effect order guarantee covers effects that read the written signal only
-  directly. An effect that also reaches it through a computed is queued when that
-  computed is notified, so it can run after an effect that subscribed to the signal
-  later.
+  they are nominal: a State does not type-check as a Computed or as a sink, and a plain
+  object with a `get` method does not type-check as a signal. The brands add nothing to `dist/index.js`.
