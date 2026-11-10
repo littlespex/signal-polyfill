@@ -1,4 +1,4 @@
-import {describe, expect, it, vi} from 'vitest';
+import {afterEach, describe, expect, it, vi} from 'vitest';
 import {Signal, batch, effect, flush, setScheduler} from '../src/index.js';
 
 const sync = (f: () => void) => f();
@@ -135,5 +135,54 @@ describe('scheduler', () => {
     drain();
     expect(fn).toHaveBeenCalledTimes(2);
     w.unwatch(b);
+  });
+});
+
+describe('synchronous scheduler', () => {
+  afterEach(() => setScheduler(null));
+
+  it('a source recomputed during a source check can write a State an effect reads', () => {
+    setScheduler(sync);
+    const src = new Signal.State(1);
+    const out = new Signal.State(0);
+    const inner = new Signal.Computed(() => {
+      out.set(src.get() * 2);
+      return src.get();
+    });
+    const outer = new Signal.Computed(() => inner.get() + 1);
+    expect(outer.get()).toBe(2);
+    const seen: number[][] = [];
+    effect(() => void seen.push([out.get(), Signal.subtle.untrack(() => outer.get())]));
+    src.set(5);
+    expect(outer.get()).toBe(6);
+    expect(seen).toEqual([
+      [2, 2],
+      [10, 6],
+    ]);
+  });
+
+  it("throws an effect's error from set()", () => {
+    setScheduler(sync);
+    const s = new Signal.State(0);
+    effect(() => {
+      if (s.get() === 1) throw new Error('boom');
+    });
+    expect(() => s.set(1)).toThrowError('boom');
+  });
+
+  it('effect() disposes the new effect when another effect fails in the flush after its first run', () => {
+    setScheduler(sync);
+    const s = new Signal.State(0);
+    const other = new Signal.State(0);
+    effect(() => {
+      if (s.get() === 1) throw new Error('other effect');
+    });
+    const fn = vi.fn(() => {
+      other.get();
+      s.set(1);
+    });
+    expect(() => effect(fn)).toThrowError('other effect');
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(Signal.subtle.hasSinks(other)).toBe(false);
   });
 });

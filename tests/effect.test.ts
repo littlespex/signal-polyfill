@@ -87,7 +87,7 @@ describe('effect', () => {
     expect(fn).toHaveBeenCalledTimes(3);
   });
 
-  it('effects on the same source run in creation order', () => {
+  it('effects on the same source run in subscription order', () => {
     const s = new Signal.State(0);
     const order: string[] = [];
     for (const name of ['a', 'b', 'c']) effect(() => void (s.get(), order.push(name)));
@@ -189,7 +189,7 @@ describe('effect', () => {
     expect(() => flush()).not.toThrow();
   });
 
-  it('flush called from inside an effect is a no-op', () => {
+  it('flush called from inside a re-running effect is a no-op', () => {
     const s = new Signal.State(0);
     const inner = vi.fn(() => void s.get());
     effect(inner);
@@ -200,5 +200,71 @@ describe('effect', () => {
     s.set(1);
     flush();
     expect(inner).toHaveBeenCalledTimes(2);
+  });
+
+  it('flush called from a re-running effect leaves the effects it queued for after the run', () => {
+    const s = new Signal.State(0);
+    const t = new Signal.State(0);
+    const log: string[] = [];
+    effect(() => {
+      if (s.get() === 1) {
+        t.set(1);
+        flush();
+        log.push('A done');
+      }
+    });
+    effect(() => void (t.get(), log.push('B')));
+    log.length = 0;
+    s.set(1);
+    flush();
+    expect(log).toEqual(['A done', 'B']);
+  });
+
+  it('flush called during an effect first run runs the pending effects', () => {
+    const s = new Signal.State(0);
+    const log: string[] = [];
+    effect(() => void log.push(`B ${s.get()}`));
+    s.set(1);
+    effect(() => {
+      flush();
+      log.push('A');
+    });
+    expect(log).toEqual(['B 0', 'B 1', 'A']);
+  });
+
+  it('effects dropped by the cycle error run again on a later write', () => {
+    const a = new Signal.State(0);
+    const b = new Signal.State(0);
+    let loop = true;
+    const first = vi.fn(() => {
+      const v = a.get();
+      if (loop) b.set(v + 1);
+    });
+    const second = vi.fn(() => {
+      const v = b.get();
+      if (loop) a.set(v + 1);
+    });
+    effect(first);
+    effect(second);
+    expect(() => flush()).toThrowError(/cycle/i);
+    loop = false;
+    const firstRuns = first.mock.calls.length;
+    const secondRuns = second.mock.calls.length;
+    a.set(-1);
+    b.set(-1);
+    flush();
+    expect(first).toHaveBeenCalledTimes(firstRuns + 1);
+    expect(second).toHaveBeenCalledTimes(secondRuns + 1);
+  });
+
+  it('a cleanup run by disposing another effect is not tracked by the running effect', () => {
+    const read = new Signal.State(0);
+    const disposeB = effect(() => () => void read.get());
+    const a = vi.fn(() => disposeB());
+    effect(a);
+    read.set(1);
+    flush();
+    expect(a).toHaveBeenCalledTimes(1);
+    expect(Signal.subtle.hasSinks(read)).toBe(false);
   });
 });
