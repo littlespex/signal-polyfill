@@ -385,3 +385,30 @@ Decided while building. Where these differ from the text above, these win.
   measured count is in `tests/benchmarks/compare/README.md`. The 450 figure was an
   estimate made before the port; the reference implements the same features in a
   similar number of lines.
+- Measured after the final fix wave (method and per-run figures in
+  `tests/benchmarks/compare/README.md`): the bundle is 3,071 B min+gzip, or 2,327 B
+  without the license notice, so the size target of goal 5 is missed either way. Heap
+  is 1,060 B per state, computed and effect against 1,084 B for preact, so that
+  target is met. The benchmark median of five alternating runs is 11,258 ms against
+  8,192 ms for preact, a ratio of 1.37, so the 1.3x target is missed. The core and
+  shell have 750 non-comment lines, the same as the reference by the `grep` count, so
+  goal 6 stays missed.
+- `Computed._refresh` is split in two for V8's inlining budget. `_refresh` keeps the
+  fast checks, and `_recompute` holds the source check and the recompute. Behavior is
+  unchanged: the steps keep the reference order, and the batch depth (an addition for
+  the synchronous scheduler) is still held from the source check until RUNNING is
+  cleared. `_refresh` raises it only when it is zero.
+- `addDependency` differs from the reference in one way: a second read of the same
+  signal in one evaluation returns the existing edge, so the edge holds the version of
+  the last read. `tests/behaviors/prohibited-contexts.test.ts` ("allows writes during
+  computed") depends on it. "Follows the reference order with no exceptions" above
+  applies to `_refresh`, not to the whole port.
+- A `watched` or `unwatched` hook that throws leaves the graph in an undefined state.
+  The README documents this; the core does not contain it. A `null` hook is ignored.
+- The public `State`, `Computed` and `Watcher` interfaces carry type-only brands, so
+  they are nominal: a State does not type-check as a Computed, as a sink, or as a
+  Watcher argument. The brands add nothing to `dist/index.js`.
+- The effect order guarantee covers effects that read the written signal only
+  directly. An effect that also reaches it through a computed is queued when that
+  computed is notified, so it can run after an effect that subscribed to the signal
+  later.

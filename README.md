@@ -55,17 +55,17 @@ setScheduler(scheduler: Scheduler | null): void;
 ```
 
 - `effect(fn)` runs `fn` once, immediately, and runs it again whenever a signal it read changes. It returns a function that disposes the effect. If `fn` returns a function, that function is the effect's cleanup. It runs before the next run and when the effect is disposed.
-- `batch(fn)` runs `fn` and returns its result. Writes made inside `fn` queue effects, and the scheduler is asked once, when the outermost `batch` ends, not after each write.
+- `batch(fn)` runs `fn` and returns its result. Writes made inside `fn` queue effects, and the scheduler is asked once, when the outermost `batch` ends, not after each write. This changes when effects run only under a scheduler that calls `flush` synchronously. `batch` does not defer `Signal.subtle.Watcher` notify callbacks, and no scheduler does: they run inside the write that notifies them.
 - `flush()` runs the pending effects now.
-- `setScheduler(scheduler)` decides when pending effects run. When an effect becomes pending, the scheduler is called with a `flush` function, and it decides when to call it. Passing `null` removes the scheduler, so nothing runs until the app calls `flush()`.
+- `setScheduler(scheduler)` sets when pending effects run. It is one setting for the whole module, not per effect. When effects become pending, the scheduler is called with a `flush` function at the end of the outermost call that queued them, and the effects run when it calls `flush`. It is called once per pending flush: if it never calls `flush`, the effects stay pending, and later writes do not call it again, until the app calls `flush()` or passes a scheduler to `setScheduler()`. Passing `null` removes the scheduler, so nothing runs until the app calls `flush()`. A flush already requested from the previous scheduler still runs after `setScheduler(null)`.
 
 There are three modes:
 
-| mode                | install                                   | effects run                                                 |
-| ------------------- | ----------------------------------------- | ----------------------------------------------------------- |
-| microtask (default) | nothing                                   | once, after the current task                                |
-| synchronous         | `setScheduler((flush) => flush())`        | at the end of the outermost write, computation or `batch`   |
-| manual              | `setScheduler(null)`, then call `flush()` | when the app calls `flush()`, for example from `timeupdate` |
+| mode                | install                                   | effects run                                                                              |
+| ------------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------- |
+| microtask (default) | nothing                                   | once, in a microtask after the current synchronous code                                  |
+| synchronous         | `setScheduler((flush) => flush())`        | at the end of the outermost write, computation, `batch`, `effect()`, disposer or cleanup |
+| manual              | `setScheduler(null)`, then call `flush()` | when the app calls `flush()`, for example from `timeupdate`                              |
 
 ```js
 import { Signal, effect, setScheduler, flush } from "signal-polyfill";
@@ -86,10 +86,20 @@ video.addEventListener("timeupdate", () => {
 
 A few behaviors are worth knowing before you rely on them.
 
-- Order: when a signal is written, the effects that read that signal directly run in the order they subscribed. Order is otherwise unspecified: across effects that reach the signal through different computeds, and across several writes before one flush.
-- Nested flushes: `flush()` does nothing when a flush is already running, for example when an effect that is re-running during a flush calls it, and it does nothing inside a `Signal.subtle.Watcher` notify callback, where signals cannot be read. In both cases the pending effects run at the next flush. An effect's first run happens inside `effect()`, not inside a flush, so a `flush()` there runs the pending effects.
-- Errors: every pending effect runs even if one throws, and `flush()` then rethrows the first error. Under the default scheduler that error is an uncaught exception in the microtask. An effect that throws on its first run is disposed, and the error is thrown from `effect()`. Effects that keep triggering themselves or each other stop after 100 passes with an error whose message contains "cycle". That includes the self-triggering example above.
-- Synchronous scheduler: the flush runs inside whichever call finished the outermost write, computation or batch, so an effect's error surfaces from that call.
+- Order: when a signal is written, the effects that read it only directly run in the order they subscribed to it. Order is otherwise unspecified: for effects that reach the signal through a computed, and across several writes before one flush.
+- Ownership: effects are not owned. An effect created inside another effect or a Computed outlives it, and each re-run of the outer one creates another. To tie the inner effect to the outer one, return its disposer as the outer effect's cleanup:
+
+  ```js
+  effect(() => {
+    if (!open.get()) return;
+    return effect(() => console.log(title.get()));
+  });
+  ```
+
+- Nested flushes: `flush()` does nothing when a flush is already running, for example when an effect that is re-running during a flush calls it. Effects queued meanwhile run in that flush's next pass. `flush()` also does nothing inside a `Signal.subtle.Watcher` notify callback, where signals cannot be read, and the pending effects wait for the next flush. An effect's first run happens inside `effect()`, not inside a flush, so a `flush()` there runs the pending effects. That does not apply when `effect()` is itself called during a flush or a Watcher callback.
+- Errors: every pending effect runs even if one throws, and `flush()` then rethrows the first error. Under the default scheduler that error is an uncaught exception in the microtask. An effect that throws on its first run is disposed, and the error is thrown from `effect()`. An effect that throws on a re-run stays subscribed. A cleanup that throws disposes its effect. Effects that keep triggering themselves or each other stop after 100 passes with an error whose message contains "cycle". That includes the self-triggering example above.
+- Synchronous scheduler: the flush runs inside whichever call finished the outermost write, computation, `batch`, `effect()`, disposer or cleanup, so an effect's error surfaces from that call. An unrelated effect's error can therefore surface from `effect()`, `Computed.get()` or a disposer. When it surfaces from `effect()`, the effect being created is disposed, because the caller never receives its disposer. An effect's error can also replace an error already propagating from the same write, for example one thrown by a Watcher callback.
+- Hooks: the `Signal.subtle.watched` and `Signal.subtle.unwatched` callbacks must not throw. They run in the middle of a graph update, and after a throw the affected Computed or effect is left in an undefined state. A `null` hook is ignored.
 
 To build effects with different semantics, `Signal.subtle.Watcher` and `Signal.Computed` are the primitives the proposal provides. Use `Signal.subtle.Watcher#getPending()` to retrieve the dirty signals and `Signal.subtle.Watcher#watch()` with no arguments to re-arm the notify callback.
 
