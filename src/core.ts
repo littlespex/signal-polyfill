@@ -413,13 +413,6 @@ export class Computed<T> {
     }
     evalContext = prevContext;
     cleanupSources(this);
-    // A Computed that is not live counts as clean as of the end of its own
-    // evaluation, even when the evaluation wrote a source it had already read.
-    // A live one keeps the version from before evaluation, so the OUTDATED
-    // mark left by such a write makes its next read recompute.
-    if (!(this._flags & TRACKING)) {
-      this._globalVersion = globalVersion;
-    }
     this._flags &= ~RUNNING;
     return true;
   }
@@ -502,13 +495,15 @@ function checkWatchArguments(watcher: unknown, signals: unknown[]): void {
 
 export class Watcher {
   _fn: (this: Watcher) => void;
-  // Head of the watched signals list, in watch order.
+  // Head and tail of the watched signals list, in watch order.
   _sources?: Edge;
+  _tail?: Edge;
   _flags: number;
 
   constructor(notify: (this: Watcher) => void) {
     this._fn = notify;
     this._sources = undefined;
+    this._tail = undefined;
     this._flags = 0;
   }
 
@@ -523,28 +518,28 @@ export class Watcher {
     checkWatchArguments(this, signals);
     this._flags &= ~NOTIFIED;
     for (const signal of signals) {
-      let node = this._sources;
-      let tail: Edge | undefined = undefined;
-      while (node !== undefined && node._source !== signal) {
-        tail = node;
-        node = node._nextSource;
+      // A signal's targets list is usually far shorter than the watched list.
+      let node = signal._targets;
+      while (node !== undefined && node._target !== this) {
+        node = node._nextTarget;
       }
       if (node === undefined) {
         node = {
           _version: 0,
           _source: signal,
-          _prevSource: tail,
+          _prevSource: this._tail,
           _nextSource: undefined,
           _target: this,
           _prevTarget: undefined,
           _nextTarget: undefined,
           _rollbackNode: undefined,
         };
-        if (tail !== undefined) {
-          tail._nextSource = node;
+        if (this._tail !== undefined) {
+          this._tail._nextSource = node;
         } else {
           this._sources = node;
         }
+        this._tail = node;
         signal._subscribe(node);
       }
     }
@@ -552,18 +547,27 @@ export class Watcher {
 
   unwatch(...signals: (State<any> | Computed<any>)[]): void {
     checkWatchArguments(this, signals);
-    for (let node = this._sources; node !== undefined; node = node._nextSource) {
-      if (signals.includes(node._source)) {
-        node._source._unsubscribe(node);
-
-        if (node._prevSource !== undefined) {
-          node._prevSource._nextSource = node._nextSource;
+    for (const signal of signals) {
+      let node = signal._targets;
+      while (node !== undefined && node._target !== this) {
+        node = node._nextTarget;
+      }
+      if (node !== undefined) {
+        // Unlinked first, so a throwing unwatched hook cannot leave this
+        // watcher listing a signal it no longer targets.
+        const prev = node._prevSource;
+        const next = node._nextSource;
+        if (prev !== undefined) {
+          prev._nextSource = next;
         } else {
-          this._sources = node._nextSource;
+          this._sources = next;
         }
-        if (node._nextSource !== undefined) {
-          node._nextSource._prevSource = node._prevSource;
+        if (next !== undefined) {
+          next._prevSource = prev;
+        } else {
+          this._tail = prev;
         }
+        signal._unsubscribe(node);
       }
     }
   }

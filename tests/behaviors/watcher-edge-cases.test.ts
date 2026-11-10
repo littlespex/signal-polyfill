@@ -45,4 +45,18 @@ describe('Watcher edge cases', () => {
     expect(c2.get()).toBe('0foo');
     expect(c2.get()).toBe('1foo');
   });
+
+  it('a computed evaluated unwatched, whose nested computed wrote one of its sources, recomputes once watched', () => {
+    const v = new Signal.State(0);
+    const c1 = new Signal.Computed(() => {
+      if (v.get() === 0) v.set(1);
+      return 'foo';
+    });
+    const c2 = new Signal.Computed(() => v.get() + c1.get());
+    expect(c2.get()).toBe('0foo');
+    const w = new Signal.subtle.Watcher(() => {});
+    w.watch(c2);
+    expect(w.getPending()).toEqual([c2]);
+    expect(c2.get()).toBe('1foo');
+  });
 });
