@@ -1,5 +1,5 @@
 import {describe, it, expect, vi} from 'vitest';
-import {Signal} from '../../../src';
+import {Signal} from '../../../src/index.js';
 
 describe('Ported - Vue', () => {
   // https://github.com/vuejs/core/blob/main/packages/reactivity/__tests__/computed.spec.ts#L32

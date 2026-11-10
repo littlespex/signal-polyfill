@@ -1,5 +1,5 @@
 import {describe, it, vi, expect} from 'vitest';
-import {Signal} from '../../src';
+import {Signal} from '../../src/index.js';
 
 /**
  * SolidJS graph tests

@@ -1,5 +1,5 @@
 import {describe, it, expect, vi} from 'vitest';
-import {Signal} from '../../../src';
+import {Signal} from '../../../src/index.js';
 
 describe('Ported - Preact', () => {
   // https://github.com/preactjs/signals/blob/main/packages/core/test/signal.test.tsx#L1078
