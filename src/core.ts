@@ -84,7 +84,9 @@ let batchedEffect: Effect | undefined = undefined;
 // Writes, computations, effect runs, cleanups and flushes in progress, plus
 // open `batch` calls. The scheduler is asked only when this returns to zero.
 let batchDepth = 0;
-// True from asking the scheduler until the flush it was given starts.
+// True from asking the scheduler until a flush starts, so the scheduler is
+// asked once per pending flush. Also cleared when the scheduler throws, when
+// `flush` is refused inside a Watcher callback, and by `setScheduler`.
 let scheduled = false;
 let flushing = false;
 let scheduler: Scheduler | null = (f) => queueMicrotask(f);
@@ -284,7 +286,7 @@ export class State<T> {
 
       if (targets !== undefined) {
         targets._prevTarget = node;
-      } else if (this._watched !== undefined) {
+      } else if (this._watched != null) {
         untrack(() => this._watched!.call(this));
       }
     }
@@ -307,7 +309,7 @@ export class State<T> {
 
       if (node === this._targets) {
         this._targets = next;
-        if (next === undefined && this._unwatched !== undefined) {
+        if (next === undefined && this._unwatched != null) {
           untrack(() => this._unwatched!.call(this));
         }
       }
@@ -806,9 +808,11 @@ export function flush(): void {
     while (batchedEffect !== undefined) {
       // Effects that keep writing each other's sources would never settle.
       const cycle = ++passes > 100;
-      // A write walks a source's targets newest first and the queue is a
-      // stack, so the effects queued by one write run in the order they
-      // subscribed.
+      // A write walks each targets list newest first and the queue is a
+      // stack, so the effects that one write queues from one targets list run
+      // in the order they joined that list. For the written signal's own list,
+      // these are the effects that read it directly. An effect queued earlier,
+      // by another write or from another list, keeps its earlier place.
       let effect: Effect | undefined = batchedEffect;
       batchedEffect = undefined;
 

@@ -6,6 +6,7 @@
     "moduleResolution": "node",
     "module": "ESNext",
     "target": "ES2019",
+    "useDefineForClassFields": false,
     "sourceMap": true,
     "declaration": true,
     "declarationMap": true,

@@ -99,6 +99,30 @@ expectTypeOf(new Signal.State(0).set(1)).toEqualTypeOf<void>();
  */
 expectTypeOf<Signal.Computed<Narrower>>().toMatchTypeOf<Signal.Computed<Broader>>();
 expectTypeOf<Signal.State<Narrower>>().toMatchTypeOf<Signal.State<Broader>>();
+expectTypeOf<Signal.State<number>>().toMatchTypeOf<Signal.State<number | string>>();
+expectTypeOf(new Signal.State(1)).toMatchTypeOf<Signal.State<number>>();
+
+/**
+ * The interfaces are nominal: one kind of signal or sink does not pass for another
+ */
+// @ts-expect-error
+expectTypeOf(Signal.subtle.introspectSources).toBeCallableWith(new Signal.State(1));
+// @ts-expect-error
+expectTypeOf(Signal.subtle.hasSources).toBeCallableWith(new Signal.State(1));
+// @ts-expect-error
+expectTypeOf<Signal.subtle.Watcher['watch']>().toBeCallableWith({get: () => 1});
+// @ts-expect-error
+expectTypeOf<Signal.State<number>>().toMatchTypeOf<Signal.Computed<number>>();
+// @ts-expect-error
+expectTypeOf<Signal.Computed<number>>().toMatchTypeOf<Signal.State<number>>();
+
+expectTypeOf(Signal.subtle.introspectSources).toBeCallableWith(new Signal.Computed(() => 1));
+expectTypeOf(Signal.subtle.introspectSources).toBeCallableWith(new Signal.subtle.Watcher(() => {}));
+expectTypeOf(Signal.subtle.hasSources).toBeCallableWith(new Signal.Computed(() => 1));
+expectTypeOf<Signal.subtle.Watcher['watch']>().toBeCallableWith(
+  new Signal.State(1),
+  new Signal.Computed(() => 1),
+);
 
 /**
  * Effects and scheduling

@@ -4,28 +4,37 @@ import * as core from './core.js';
 // beside the Signal namespace rather than in it.
 export {batch, effect, flush, setScheduler, type Scheduler} from './core.js';
 
+// Brands that make the public interfaces nominal, so that a State does not
+// type-check where a Computed or a Watcher is expected. They exist only in the
+// types and add nothing to the build output.
+declare const stateBrand: unique symbol;
+declare const computedBrand: unique symbol;
+declare const watcherBrand: unique symbol;
+
 // The core classes are the graph nodes. Their internals cannot be
 // TypeScript-private, because the graph functions and the sibling classes read
 // them, so the public types are interfaces that leave the internals out.
 export namespace Signal {
   // A read-write Signal.
   export interface State<T> {
+    readonly [stateBrand]: true;
     get(): T;
     set(value: T): void;
   }
-  export const State: {
+  export const State = core.State as unknown as {
     new <T>(initialValue: T, options?: Options<T>): State<T>;
     prototype: State<any>;
-  } = core.State;
+  };
 
   // A Signal which is a formula based on other Signals.
   export interface Computed<T> {
+    readonly [computedBrand]: true;
     get(): T;
   }
-  export const Computed: {
+  export const Computed = core.Computed as unknown as {
     new <T>(computation: () => T, options?: Options<T>): Computed<T>;
     prototype: Computed<any>;
-  } = core.Computed;
+  };
 
   export const isState = core.isState;
   export const isComputed = core.isComputed;
@@ -38,12 +47,13 @@ export namespace Signal {
     // Runs a callback with all tracking disabled, even for nested Computeds.
     export const untrack: <T>(cb: () => T) => T = core.untrack;
 
-    export const currentComputed: () => Computed<any> | undefined = core.currentComputed;
+    export const currentComputed = core.currentComputed as () => Computed<any> | undefined;
 
     // The signals this sink read during its last evaluation, in order.
     export const introspectSources = core.introspectSources as (sink: AnySink) => AnySignal[];
 
-    // The live Computeds and Watchers that depend on this signal.
+    // The live Computeds and Watchers that depend on this signal, in
+    // unspecified order.
     export const introspectSinks = core.introspectSinks as (signal: AnySignal) => AnySink[];
 
     // True iff anything depends on this signal live. That includes effects,
@@ -54,6 +64,7 @@ export namespace Signal {
     export const hasSources: (signal: AnySink) => boolean = core.hasSources;
 
     export interface Watcher {
+      readonly [watcherBrand]: true;
       // Adds these signals to the watched set and lets the notify callback run
       // again on the next change. Can be called with no arguments for the latter.
       watch(...signals: AnySignal[]): void;
@@ -63,10 +74,10 @@ export namespace Signal {
     }
     // The notify callback runs at most once between two `watch` calls, inside
     // the write that caused it. No signal may be read or written while it runs.
-    export const Watcher: {
+    export const Watcher = core.Watcher as unknown as {
       new (notify: (this: Watcher) => void): Watcher;
       prototype: Watcher;
-    } = core.Watcher;
+    };
 
     // Hooks to observe being watched or no longer watched.
     export const watched: typeof core.WATCHED = core.WATCHED;
