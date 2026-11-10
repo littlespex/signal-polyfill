@@ -408,44 +408,55 @@ export class Computed<T> {
 
     // Set before checking sources, so a cycle through them is caught.
     this._flags |= RUNNING;
-    // The depth stays raised until RUNNING is cleared. A source recomputed
-    // while checking can write a State, and an effect flushed before this
-    // finishes would hit the cycle error when it reads this Computed.
-    batchDepth++;
-    try {
-      if (this._version > 0 && !needsToRecompute(this)) {
-        this._flags &= ~RUNNING;
-        return true;
-      }
-
-      const prevContext = evalContext;
+    // The depth stays above zero until RUNNING is cleared, and is raised here
+    // only when nothing else holds it. A source recomputed while checking can
+    // write a State, and an effect flushed before this finishes would hit the
+    // cycle error when it reads this Computed.
+    if (batchDepth !== 0) {
+      this._recompute();
+    } else {
+      batchDepth++;
       try {
-        prepareSources(this);
-        evalContext = this;
-        const value = this._fn();
-        // `_equals` runs as part of the evaluation: signals it reads become
-        // sources, and an error it throws is cached like one from `_fn`.
-        if (
-          this._version === 0 ||
-          this._flags & HAS_ERROR ||
-          !this._equals(this._value as T, value)
-        ) {
-          this._value = value;
-          this._flags &= ~HAS_ERROR;
-          this._version++;
-        }
-      } catch (err) {
-        this._value = err;
-        this._flags |= HAS_ERROR;
+        this._recompute();
+      } finally {
+        endBatch();
+      }
+    }
+    return true;
+  }
+
+  // The source check and the recompute, kept out of `_refresh` so that the
+  // checks before them stay small enough for V8 to inline.
+  _recompute(): void {
+    if (this._version > 0 && !needsToRecompute(this)) {
+      this._flags &= ~RUNNING;
+      return;
+    }
+
+    const prevContext = evalContext;
+    try {
+      prepareSources(this);
+      evalContext = this;
+      const value = this._fn();
+      // `_equals` runs as part of the evaluation: signals it reads become
+      // sources, and an error it throws is cached like one from `_fn`.
+      if (
+        this._version === 0 ||
+        this._flags & HAS_ERROR ||
+        !this._equals(this._value as T, value)
+      ) {
+        this._value = value;
+        this._flags &= ~HAS_ERROR;
         this._version++;
       }
-      evalContext = prevContext;
-      cleanupSources(this);
-      this._flags &= ~RUNNING;
-      return true;
-    } finally {
-      endBatch();
+    } catch (err) {
+      this._value = err;
+      this._flags |= HAS_ERROR;
+      this._version++;
     }
+    evalContext = prevContext;
+    cleanupSources(this);
+    this._flags &= ~RUNNING;
   }
 
   _subscribe(node: Edge): void {
