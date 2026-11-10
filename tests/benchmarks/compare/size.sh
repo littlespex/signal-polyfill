@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-measure() { pnpm exec esbuild "$@" --bundle --format=esm --minify --target=es2019 | gzip -9 | wc -c | tr -d ' '; }
+measure() { pnpm exec esbuild "$@" --bundle --format=esm --minify --target=es2021 | gzip -9 | wc -c | tr -d ' '; }
 preact_entry="export * from '@preact/signals-core'"
 # Assign before printing: set -e fires on a failed assignment, but not inside echo "$(...)".
 # pipefail makes measure return esbuild's exit status.
