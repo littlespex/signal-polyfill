@@ -389,7 +389,7 @@ Decided while building. Where these differ from the text above, these win.
   similar number of lines.
 - Measured after the final fix wave (method and per-run figures in
   `tests/benchmarks/compare/README.md`): the bundle is 3,048 B min+gzip, or 2,305 B
-  without the license notice (both at the ES2021 target, see below), so the size target of goal 5 is missed either way. Heap
+  without the license notice (both at the ES2022 target, see below), so the size target of goal 5 is missed either way. Heap
   is 1,060 B per state, computed and effect against 1,084 B for preact, so that
   target is met. The benchmark median of five alternating runs is 11,258 ms against
   8,192 ms for preact, a ratio of 1.37, so the 1.3x target is missed. The core and
@@ -410,10 +410,13 @@ Decided while building. Where these differ from the text above, these win.
 - The public `State`, `Computed` and `Watcher` interfaces carry type-only brands, so
   they are nominal: a State does not type-check as a Computed or as a sink, and a plain
   object with a `get` method does not type-check as a signal. The brands add nothing to `dist/index.js`.
-- The build target is ES2021, not ES2019. This was decided after hand-over and
+- The build target is ES2022, not ES2019. This was decided after hand-over and
   replaces goal 7 and the ES2019 lines above. `tsconfig.json`, `vite.config.ts` and
-  `size.sh` use it. `dist/index.js` keeps `?.` and `??`, so it needs Chromium 80 or
-  Safari 13.1 unless the app's build lowers the syntax. A minifier that targets
-  ES2021 can also emit `??=`, which needs Chromium 85 or Safari 14. The change saves
-  22 B gzipped (2,327 B to 2,305 B without the license notice). The output still has
-  no helper functions.
+  `size.sh` use it. The source still has no class field initializers and no `#private`
+  names, so `dist/index.js` is the same file that an ES2021 target produces. It keeps
+  `?.` and `??`, so it needs Chromium 80 or Safari 13.1 unless the app lowers the
+  syntax in its own build. A minifier that targets ES2021 or later can also emit `??=`,
+  which needs Chromium 85 or Safari 14. The change saves 22 B gzipped (2,327 B to
+  2,305 B without the license notice). The old graph gains more from this target: it
+  is 2,082 B without license comments, because it used class fields. The output still
+  has no helper functions.
