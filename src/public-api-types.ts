@@ -3,7 +3,7 @@
  * and that we double-check what we're exposing as public API
  */
 import {expectTypeOf} from 'expect-type';
-import {Signal} from './index.ts';
+import {Signal, batch, effect, flush, setScheduler, type Scheduler} from './index.ts';
 
 /**
  * Top-Level
@@ -99,6 +99,14 @@ expectTypeOf(new Signal.State(0).set(1)).toEqualTypeOf<void>();
  */
 expectTypeOf<Signal.Computed<Narrower>>().toMatchTypeOf<Signal.Computed<Broader>>();
 expectTypeOf<Signal.State<Narrower>>().toMatchTypeOf<Signal.State<Broader>>();
+
+/**
+ * Effects and scheduling
+ */
+expectTypeOf(effect).toEqualTypeOf<(fn: () => void | (() => void)) => () => void>();
+expectTypeOf(batch(() => 1)).toEqualTypeOf<number>();
+expectTypeOf(flush).toEqualTypeOf<() => void>();
+expectTypeOf(setScheduler).parameter(0).toEqualTypeOf<Scheduler | null>();
 
 /**
  * Test data types

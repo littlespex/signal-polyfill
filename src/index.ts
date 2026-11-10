@@ -1,5 +1,9 @@
 import * as core from './core.js';
 
+// Effects and their scheduling are not part of the proposal, so they sit
+// beside the Signal namespace rather than in it.
+export {batch, effect, flush, setScheduler, type Scheduler} from './core.js';
+
 // The core classes are the graph nodes. Their internals cannot be
 // TypeScript-private, because the graph functions and the sibling classes read
 // them, so the public types are interfaces that leave the internals out.
@@ -42,7 +46,8 @@ export namespace Signal {
     // The live Computeds and Watchers that depend on this signal.
     export const introspectSinks = core.introspectSinks as (signal: AnySignal) => AnySink[];
 
-    // True iff introspectSinks() is non-empty.
+    // True iff anything depends on this signal live. That includes effects,
+    // which introspectSinks() leaves out.
     export const hasSinks: (signal: AnySignal) => boolean = core.hasSinks;
 
     // True iff introspectSources() is non-empty.

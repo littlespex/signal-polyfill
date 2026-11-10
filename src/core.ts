@@ -52,7 +52,7 @@ type Edge = {
   _source: State<any> | Computed<any>;
   _prevSource?: Edge;
   _nextSource?: Edge;
-  _target: Computed<any> | Watcher;
+  _target: Computed<any> | Watcher | Effect;
   _prevTarget?: Edge;
   _nextTarget?: Edge;
   _version: number;
@@ -60,8 +60,13 @@ type Edge = {
   _rollbackNode?: Edge;
 };
 
-// The Computed currently being evaluated.
-let evalContext: Computed<any> | undefined = undefined;
+type EffectFn = () => void | (() => void);
+
+// Called with `flush` when effects become pending outside any batch.
+export type Scheduler = (flush: () => void) => void;
+
+// The Computed or effect currently being evaluated.
+let evalContext: Computed<any> | Effect | undefined = undefined;
 
 // Bumped on every State change, so a Computed can skip walking its sources
 // when nothing at all has changed since its last refresh.
@@ -72,6 +77,17 @@ let notifying = false;
 
 // Watchers notified by the current write whose callbacks have not run yet.
 const notifiedWatchers: Watcher[] = [];
+
+// Effects waiting for a flush, linked newest first through
+// `_nextBatchedEffect`.
+let batchedEffect: Effect | undefined = undefined;
+// Writes, computations, effect runs, cleanups and flushes in progress, plus
+// open `batch` calls. The scheduler is asked only when this returns to zero.
+let batchDepth = 0;
+// True from asking the scheduler until the flush it was given starts.
+let scheduled = false;
+let flushing = false;
+let scheduler: Scheduler | null = (f) => queueMicrotask(f);
 
 export function untrack<T>(fn: () => T): T {
   const prevContext = evalContext;
@@ -137,7 +153,7 @@ function addDependency(signal: State<any> | Computed<any>): Edge | undefined {
   return node;
 }
 
-function needsToRecompute(target: Computed<any>): boolean {
+function needsToRecompute(target: Computed<any> | Effect): boolean {
   // Sources are in order of use, so when several have changed, only the first
   // one is refreshed before the target recomputes.
   for (let node = target._sources; node !== undefined; node = node._nextSource) {
@@ -154,7 +170,7 @@ function needsToRecompute(target: Computed<any>): boolean {
   return false;
 }
 
-function prepareSources(target: Computed<any>) {
+function prepareSources(target: Computed<any> | Effect) {
   // Marks every current edge reusable, points each source at its edge so
   // addDependency finds it, and leaves `target._sources` at the tail.
   for (let node = target._sources; node !== undefined; node = node._nextSource) {
@@ -172,7 +188,7 @@ function prepareSources(target: Computed<any>) {
   }
 }
 
-function cleanupSources(target: Computed<any>) {
+function cleanupSources(target: Computed<any> | Effect) {
   let node = target._sources;
   let head: Edge | undefined = undefined;
 
@@ -326,11 +342,18 @@ export class State<T> {
 
       // The first phase marks the whole graph and runs no user code, so a
       // Watcher callback that throws cannot leave a live Computed unmarked.
-      for (let node = this._targets; node !== undefined; node = node._nextTarget) {
-        node._target._notify();
-      }
-      if (notifiedWatchers.length !== 0) {
-        runWatchers();
+      // Effects are only queued, and the depth keeps them from running until
+      // both phases are over.
+      batchDepth++;
+      try {
+        for (let node = this._targets; node !== undefined; node = node._nextTarget) {
+          node._target._notify();
+        }
+        if (notifiedWatchers.length !== 0) {
+          runWatchers();
+        }
+      } finally {
+        endBatch();
       }
     }
   }
@@ -385,36 +408,44 @@ export class Computed<T> {
 
     // Set before checking sources, so a cycle through them is caught.
     this._flags |= RUNNING;
-    if (this._version > 0 && !needsToRecompute(this)) {
-      this._flags &= ~RUNNING;
-      return true;
-    }
-
-    const prevContext = evalContext;
+    // The depth stays raised until RUNNING is cleared. A source recomputed
+    // while checking can write a State, and an effect flushed before this
+    // finishes would hit the cycle error when it reads this Computed.
+    batchDepth++;
     try {
-      prepareSources(this);
-      evalContext = this;
-      const value = this._fn();
-      // `_equals` runs as part of the evaluation: signals it reads become
-      // sources, and an error it throws is cached like one from `_fn`.
-      if (
-        this._version === 0 ||
-        this._flags & HAS_ERROR ||
-        !this._equals(this._value as T, value)
-      ) {
-        this._value = value;
-        this._flags &= ~HAS_ERROR;
+      if (this._version > 0 && !needsToRecompute(this)) {
+        this._flags &= ~RUNNING;
+        return true;
+      }
+
+      const prevContext = evalContext;
+      try {
+        prepareSources(this);
+        evalContext = this;
+        const value = this._fn();
+        // `_equals` runs as part of the evaluation: signals it reads become
+        // sources, and an error it throws is cached like one from `_fn`.
+        if (
+          this._version === 0 ||
+          this._flags & HAS_ERROR ||
+          !this._equals(this._value as T, value)
+        ) {
+          this._value = value;
+          this._flags &= ~HAS_ERROR;
+          this._version++;
+        }
+      } catch (err) {
+        this._value = err;
+        this._flags |= HAS_ERROR;
         this._version++;
       }
-    } catch (err) {
-      this._value = err;
-      this._flags |= HAS_ERROR;
-      this._version++;
+      evalContext = prevContext;
+      cleanupSources(this);
+      this._flags &= ~RUNNING;
+      return true;
+    } finally {
+      endBatch();
     }
-    evalContext = prevContext;
-    cleanupSources(this);
-    this._flags &= ~RUNNING;
-    return true;
   }
 
   _subscribe(node: Edge): void {
@@ -585,6 +616,216 @@ export class Watcher {
     }
     return pending;
   }
+}
+
+function cleanupEffect(effect: Effect): void {
+  const cleanup = effect._cleanup;
+  effect._cleanup = undefined;
+
+  if (cleanup !== undefined) {
+    batchDepth++;
+    // A cleanup runs outside any tracking context.
+    const prevContext = evalContext;
+    evalContext = undefined;
+    try {
+      cleanup();
+    } catch (err) {
+      // When this runs from `_start`, no `endEffect` follows to clear RUNNING.
+      effect._flags &= ~RUNNING;
+      effect._flags |= DISPOSED;
+      disposeEffect(effect);
+      throw err;
+    } finally {
+      evalContext = prevContext;
+      endBatch();
+    }
+  }
+}
+
+function disposeEffect(effect: Effect): void {
+  for (let node = effect._sources; node !== undefined; node = node._nextSource) {
+    node._source._unsubscribe(node);
+  }
+  effect._fn = undefined;
+  effect._sources = undefined;
+
+  cleanupEffect(effect);
+}
+
+function endEffect(effect: Effect, prevContext: Computed<any> | Effect | undefined): void {
+  evalContext = prevContext;
+  try {
+    cleanupSources(effect);
+    effect._flags &= ~RUNNING;
+    // A dispose requested during the run waits until the run is over.
+    if (effect._flags & DISPOSED) {
+      disposeEffect(effect);
+    }
+  } finally {
+    endBatch();
+  }
+}
+
+class Effect {
+  _fn?: EffectFn;
+  _cleanup?: () => void;
+  // Head of the sources list, or its tail while running.
+  _sources?: Edge;
+  _nextBatchedEffect?: Effect;
+  _flags: number;
+
+  constructor(fn: EffectFn) {
+    this._fn = fn;
+    this._cleanup = undefined;
+    this._sources = undefined;
+    this._nextBatchedEffect = undefined;
+    // An effect is always live, so it subscribes to each source as it reads it.
+    this._flags = TRACKING;
+  }
+
+  _callback(): void {
+    const prevContext = this._start();
+    try {
+      // A cleanup can dispose its own effect, which then skips the run.
+      if (this._flags & DISPOSED) {
+        return;
+      }
+      const cleanup = this._fn!();
+      if (typeof cleanup === 'function') {
+        this._cleanup = cleanup;
+      }
+    } finally {
+      endEffect(this, prevContext);
+    }
+  }
+
+  // Returns the context for `endEffect` to restore.
+  _start(): Computed<any> | Effect | undefined {
+    // Reached when an effect calls `flush` during its first run, which is
+    // outside any flush, after writing one of its own sources.
+    if (this._flags & RUNNING) {
+      throw new Error('Detected cycle in effects.');
+    }
+    this._flags |= RUNNING;
+    cleanupEffect(this);
+    prepareSources(this);
+
+    batchDepth++;
+    const prevContext = evalContext;
+    evalContext = this;
+    return prevContext;
+  }
+
+  _notify(): void {
+    if (!(this._flags & NOTIFIED)) {
+      this._flags |= NOTIFIED;
+      this._nextBatchedEffect = batchedEffect;
+      batchedEffect = this;
+    }
+  }
+
+  _dispose(): void {
+    this._flags |= DISPOSED;
+    if (!(this._flags & RUNNING)) {
+      disposeEffect(this);
+    }
+  }
+}
+
+export function effect(fn: EffectFn): () => void {
+  const effect = new Effect(fn);
+  try {
+    effect._callback();
+  } catch (err) {
+    effect._dispose();
+    throw err;
+  }
+  // A bound function needs no closure context, so it is smaller.
+  return effect._dispose.bind(effect);
+}
+
+function endBatch(): void {
+  batchDepth--;
+  scheduleFlush();
+}
+
+// Asks for one flush when effects are pending outside every batch, and not
+// again until that flush starts.
+function scheduleFlush(): void {
+  if (batchDepth === 0 && batchedEffect !== undefined && !scheduled && scheduler !== null) {
+    scheduled = true;
+    scheduler(flush);
+  }
+}
+
+export function batch<T>(fn: () => T): T {
+  batchDepth++;
+  try {
+    return fn();
+  } finally {
+    endBatch();
+  }
+}
+
+export function flush(): void {
+  // A nested call leaves the queue to the running flush. Effects never run
+  // inside a Watcher callback, where their reads would throw.
+  if (flushing || notifying) {
+    return;
+  }
+  scheduled = false;
+  flushing = true;
+  batchDepth++;
+  let error: unknown;
+  let hasError = false;
+  let passes = 0;
+  try {
+    while (batchedEffect !== undefined) {
+      // Effects that keep writing each other's sources would never settle.
+      const cycle = ++passes > 100;
+      // A write notifies a targets list newest first and the queue is a
+      // stack, so the effects on one source run in creation order.
+      let effect: Effect | undefined = batchedEffect;
+      batchedEffect = undefined;
+
+      while (effect !== undefined) {
+        const next: Effect | undefined = effect._nextBatchedEffect;
+        effect._nextBatchedEffect = undefined;
+        effect._flags &= ~NOTIFIED;
+
+        if (!cycle && !(effect._flags & DISPOSED)) {
+          // Inside the try because a source refreshed here can run a hook that throws.
+          try {
+            if (needsToRecompute(effect)) {
+              effect._callback();
+            }
+          } catch (err) {
+            if (!hasError) {
+              error = err;
+              hasError = true;
+            }
+          }
+        }
+        effect = next;
+      }
+      if (cycle) {
+        throw new Error('Detected cycle in effects.');
+      }
+    }
+  } finally {
+    flushing = false;
+    endBatch();
+  }
+  if (hasError) {
+    throw error;
+  }
+}
+
+export function setScheduler(s: Scheduler | null): void {
+  scheduler = s;
+  // The previous scheduler may never call the flush it was given.
+  scheduled = false;
+  scheduleFlush();
 }
 
 export function currentComputed(): Computed<any> | undefined {
