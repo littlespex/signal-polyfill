@@ -102,4 +102,38 @@ describe('scheduler', () => {
     setScheduler(sync);
     expect(fn).toHaveBeenCalledTimes(2);
   });
+
+  it('a scheduler that throws is asked again on the next write', () => {
+    let fail = true;
+    const scheduler = vi.fn((f: () => void) => {
+      if (fail) throw new Error('scheduler');
+      f();
+    });
+    setScheduler(scheduler);
+    const {a, fn} = counted();
+    expect(() => a.set(1)).toThrowError('scheduler');
+    expect(fn).toHaveBeenCalledTimes(1);
+    fail = false;
+    a.set(2);
+    expect(scheduler).toHaveBeenCalledTimes(2);
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+
+  it('a scheduled flush called from a Watcher callback is not lost', () => {
+    const parked: Array<() => void> = [];
+    const scheduler = vi.fn((f: () => void) => void parked.push(f));
+    const drain = () => parked.splice(0).forEach((f) => f());
+    setScheduler(scheduler);
+    const {a, b, fn} = counted();
+    a.set(1);
+    expect(scheduler).toHaveBeenCalledTimes(1);
+    const w = new Signal.subtle.Watcher(drain);
+    w.watch(b);
+    b.set(1);
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(scheduler).toHaveBeenCalledTimes(2);
+    drain();
+    expect(fn).toHaveBeenCalledTimes(2);
+    w.unwatch(b);
+  });
 });

@@ -754,7 +754,13 @@ function endBatch(): void {
 function scheduleFlush(): void {
   if (batchDepth === 0 && batchedEffect !== undefined && !scheduled && scheduler !== null) {
     scheduled = true;
-    scheduler(flush);
+    try {
+      scheduler(flush);
+    } catch (err) {
+      // The flush was never handed over, so the next write must ask again.
+      scheduled = false;
+      throw err;
+    }
   }
 }
 
@@ -768,9 +774,15 @@ export function batch<T>(fn: () => T): T {
 }
 
 export function flush(): void {
-  // A nested call leaves the queue to the running flush. Effects never run
-  // inside a Watcher callback, where their reads would throw.
-  if (flushing || notifying) {
+  // A nested call leaves the queue to the running flush.
+  if (flushing) {
+    return;
+  }
+  // Effects never run inside a Watcher callback, where their reads would
+  // throw. Clearing the flag lets the write ask the scheduler again once its
+  // callbacks are done, so a scheduled flush refused here is not lost.
+  if (notifying) {
+    scheduled = false;
     return;
   }
   scheduled = false;
@@ -783,8 +795,9 @@ export function flush(): void {
     while (batchedEffect !== undefined) {
       // Effects that keep writing each other's sources would never settle.
       const cycle = ++passes > 100;
-      // A write notifies a targets list newest first and the queue is a
-      // stack, so the effects on one source run in creation order.
+      // A write walks a source's targets newest first and the queue is a
+      // stack, so the effects queued by one write run in the order they
+      // subscribed.
       let effect: Effect | undefined = batchedEffect;
       batchedEffect = undefined;
 
