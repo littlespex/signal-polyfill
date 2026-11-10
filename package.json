@@ -36,15 +36,19 @@
     "lint:prettier": "prettier --check .",
     "lint:fix": "prettier --write .",
     "test": "vitest",
-    "benchmarks": "esbuild tests/benchmarks/benchmarks.ts --bundle --format=esm --platform=node --outdir=build --sourcemap=external && node --expose-gc ./build/benchmarks.js"
+    "benchmarks": "esbuild tests/benchmarks/benchmarks.ts --bundle --format=esm --platform=node --outdir=build --sourcemap=external && node --expose-gc ./build/benchmarks.js",
+    "compare:size": "bash tests/benchmarks/compare/size.sh",
+    "compare:heap": "esbuild tests/benchmarks/compare/heap.ts --bundle --format=esm --platform=node --outdir=build && node --expose-gc build/heap.js polyfill && node --expose-gc build/heap.js preact",
+    "compare:bench": "esbuild tests/benchmarks/compare/bench.ts --bundle --format=esm --platform=node --outdir=build && node --expose-gc build/bench.js polyfill && node --expose-gc build/bench.js preact"
   },
   "devDependencies": {
-    "esbuild": "^0.25.0",
-    "js-reactivity-benchmark": "divdavem/js-reactivity-benchmark#77a55ade586a1aac5a67265a4892ff9ae7902500",
+    "@preact/signals-core": "^1.14.5",
     "@types/node": "^20.11.25",
     "@vitest/browser": "^1.5.3",
     "concurrently": "^9.0.1",
+    "esbuild": "^0.25.0",
     "expect-type": "^1.0.0",
+    "js-reactivity-benchmark": "divdavem/js-reactivity-benchmark#77a55ade586a1aac5a67265a4892ff9ae7902500",
     "prettier": "^3.2.5",
     "release-plan": "^0.9.0",
     "typescript": "^5.4.0",
