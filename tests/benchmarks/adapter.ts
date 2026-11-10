@@ -1,5 +1,5 @@
 import {ReactiveFramework} from 'js-reactivity-benchmark';
-import {Signal} from '../../src/wrapper.js';
+import {Signal} from '../../src/index.js';
 
 export const tc39SignalsProposalStage0: ReactiveFramework = {
   name: 'TC39 Signals Polyfill',

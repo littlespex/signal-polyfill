@@ -32,15 +32,29 @@ const DISPOSED = 1 << 3;
 const HAS_ERROR = 1 << 4;
 const TRACKING = 1 << 5;
 
-// One edge per (source, target) pair, linked into the target's sources list.
-// It records the source version the target last saw, so checking for changes
-// needs no copy of the source's value. The version -1 marks an edge from the
-// previous evaluation that has not been read again yet.
+// Option keys for the hooks called when a signal gains its first target and
+// when it loses its last one.
+export const WATCHED: unique symbol = Symbol('watched');
+export const UNWATCHED: unique symbol = Symbol('unwatched');
+
+type Options<T> = {
+  equals?: (a: T, b: T) => boolean;
+  [WATCHED]?: () => void;
+  [UNWATCHED]?: () => void;
+};
+
+// One edge per (source, target) pair, linked into the target's sources list
+// and, while the target is live, into the source's targets list. It records
+// the source version the target last saw, so checking for changes needs no
+// copy of the source's value. The version -1 marks an edge from the previous
+// evaluation that has not been read again yet.
 type Edge = {
   _source: State<any> | Computed<any>;
   _prevSource?: Edge;
   _nextSource?: Edge;
-  _target: Computed<any>;
+  _target: Computed<any> | Watcher;
+  _prevTarget?: Edge;
+  _nextTarget?: Edge;
   _version: number;
   // The source's `_node` before this evaluation, restored when it ends.
   _rollbackNode?: Edge;
@@ -52,6 +66,12 @@ let evalContext: Computed<any> | undefined = undefined;
 // Bumped on every State change, so a Computed can skip walking its sources
 // when nothing at all has changed since its last refresh.
 let globalVersion = 0;
+
+// True while Watcher callbacks run. Reading or writing a signal then throws.
+let notifying = false;
+
+// Watchers notified by the current write whose callbacks have not run yet.
+const notifiedWatchers: Watcher[] = [];
 
 export function untrack<T>(fn: () => T): T {
   const prevContext = evalContext;
@@ -77,6 +97,8 @@ function addDependency(signal: State<any> | Computed<any>): Edge | undefined {
       _prevSource: evalContext._sources,
       _nextSource: undefined,
       _target: evalContext,
+      _prevTarget: undefined,
+      _nextTarget: undefined,
       _rollbackNode: node,
     };
 
@@ -85,6 +107,11 @@ function addDependency(signal: State<any> | Computed<any>): Edge | undefined {
     }
     evalContext._sources = node;
     signal._node = node;
+
+    // A live target subscribes to a new source as soon as it reads it.
+    if (evalContext._flags & TRACKING) {
+      signal._subscribe(node);
+    }
   } else if (node._version === -1) {
     // A dependency from the previous evaluation: reuse the edge and move it
     // to the tail, so the list stays in order of use.
@@ -149,12 +176,14 @@ function cleanupSources(target: Computed<any>) {
   let node = target._sources;
   let head: Edge | undefined = undefined;
 
-  // Walks back from the tail, unlinking edges that were not read again and
-  // restoring each source's previous `_node`.
+  // Walks back from the tail, unsubscribing and unlinking edges that were not
+  // read again and restoring each source's previous `_node`.
   while (node !== undefined) {
     const prev = node._prevSource;
 
     if (node._version === -1) {
+      node._source._unsubscribe(node);
+
       if (prev !== undefined) {
         prev._nextSource = node._nextSource;
       }
@@ -176,28 +205,105 @@ function cleanupSources(target: Computed<any>) {
   target._sources = head;
 }
 
+// The second phase of a write. Runs the callback of every Watcher the first
+// phase notified, with `this` as the watcher. All of them run even if one
+// throws, and the first error is rethrown afterwards.
+function runWatchers(): void {
+  let error: unknown;
+  let hasError = false;
+  notifying = true;
+  try {
+    for (const watcher of notifiedWatchers) {
+      try {
+        watcher._fn.call(watcher);
+      } catch (err) {
+        if (!hasError) {
+          error = err;
+          hasError = true;
+        }
+      }
+    }
+  } finally {
+    notifying = false;
+    notifiedWatchers.length = 0;
+  }
+  if (hasError) {
+    throw error;
+  }
+}
+
 export class State<T> {
   _value: T;
   // Never negative, because edges use -1 as a marker.
   _version: number;
   // The edge for the current evaluation context, if it has read this signal.
   _node?: Edge;
+  // Head of the targets list. Defined exactly while the signal is live.
+  _targets?: Edge;
   _equals: (a: T, b: T) => boolean;
+  _watched?: () => void;
+  _unwatched?: () => void;
 
-  constructor(value: T, options?: {equals?: (a: T, b: T) => boolean}) {
+  constructor(value: T, options?: Options<T>) {
     this._value = value;
     this._version = 0;
     this._node = undefined;
+    this._targets = undefined;
     this._equals = options?.equals ?? Object.is;
+    this._watched = options?.[WATCHED];
+    this._unwatched = options?.[UNWATCHED];
   }
 
   _refresh(): boolean {
     return true;
   }
 
+  // Computed calls these two through `State.prototype`, as the reference
+  // calls its base class.
+  _subscribe(this: State<any> | Computed<any>, node: Edge): void {
+    const targets = this._targets;
+    if (targets !== node && node._prevTarget === undefined) {
+      node._nextTarget = targets;
+      this._targets = node;
+
+      if (targets !== undefined) {
+        targets._prevTarget = node;
+      } else if (this._watched !== undefined) {
+        untrack(() => this._watched!.call(this));
+      }
+    }
+  }
+
+  _unsubscribe(this: State<any> | Computed<any>, node: Edge): void {
+    // An edge can only be in the targets list of a live signal.
+    if (this._targets !== undefined) {
+      const prev = node._prevTarget;
+      const next = node._nextTarget;
+      if (prev !== undefined) {
+        prev._nextTarget = next;
+        node._prevTarget = undefined;
+      }
+
+      if (next !== undefined) {
+        next._prevTarget = prev;
+        node._nextTarget = undefined;
+      }
+
+      if (node === this._targets) {
+        this._targets = next;
+        if (next === undefined && this._unwatched !== undefined) {
+          untrack(() => this._unwatched!.call(this));
+        }
+      }
+    }
+  }
+
   get(): T {
     if (!(this instanceof State)) {
       throw new TypeError('Invalid receiver');
+    }
+    if (notifying) {
+      throw new Error('Reads from signals not permitted during Watcher callback');
     }
     const node = addDependency(this);
     if (node !== undefined) {
@@ -210,10 +316,22 @@ export class State<T> {
     if (!(this instanceof State)) {
       throw new TypeError('Invalid receiver');
     }
+    if (notifying) {
+      throw new Error('Writes to signals not permitted during Watcher callback');
+    }
     if (!this._equals(this._value, value)) {
       this._value = value;
       this._version++;
       globalVersion++;
+
+      // The first phase marks the whole graph and runs no user code, so a
+      // Watcher callback that throws cannot leave a live Computed unmarked.
+      for (let node = this._targets; node !== undefined; node = node._nextTarget) {
+        node._target._notify();
+      }
+      if (notifiedWatchers.length !== 0) {
+        runWatchers();
+      }
     }
   }
 }
@@ -224,26 +342,39 @@ export class Computed<T> {
   _value: unknown;
   _version: number;
   _node?: Edge;
+  _targets?: Edge;
   // Head of the sources list, or its tail while evaluating.
   _sources?: Edge;
   _globalVersion: number;
   _flags: number;
   _equals: (a: T, b: T) => boolean;
+  _watched?: () => void;
+  _unwatched?: () => void;
 
-  constructor(fn: () => T, options?: {equals?: (a: T, b: T) => boolean}) {
+  constructor(fn: () => T, options?: Options<T>) {
     this._fn = fn;
     this._value = undefined;
     this._version = 0;
     this._node = undefined;
+    this._targets = undefined;
     this._sources = undefined;
     this._globalVersion = globalVersion - 1;
     this._flags = OUTDATED;
     this._equals = options?.equals ?? Object.is;
+    this._watched = options?.[WATCHED];
+    this._unwatched = options?.[UNWATCHED];
   }
 
   _refresh(): boolean {
+    this._flags &= ~NOTIFIED;
+
     if (this._flags & RUNNING) {
       return false;
+    }
+
+    // A live Computed that no source has notified cannot have changed.
+    if ((this._flags & (OUTDATED | TRACKING)) === TRACKING) {
+      return true;
     }
     this._flags &= ~OUTDATED;
 
@@ -282,18 +413,66 @@ export class Computed<T> {
     }
     evalContext = prevContext;
     cleanupSources(this);
-    // The old implementation treated a Computed as clean as of the end of its
-    // own evaluation, and two ported Vue tests pin that. The reference keeps
-    // the version from before evaluation, so a write made during it would
-    // force a recompute on the next read.
-    this._globalVersion = globalVersion;
+    // A Computed that is not live counts as clean as of the end of its own
+    // evaluation, even when the evaluation wrote a source it had already read.
+    // A live one keeps the version from before evaluation, so the OUTDATED
+    // mark left by such a write makes its next read recompute.
+    if (!(this._flags & TRACKING)) {
+      this._globalVersion = globalVersion;
+    }
     this._flags &= ~RUNNING;
     return true;
+  }
+
+  _subscribe(node: Edge): void {
+    if (this._targets === undefined) {
+      // Going live runs no computation. Sources written while this was not
+      // live sent it no notification, so it is marked OUTDATED only when some
+      // State has changed since its last refresh.
+      this._flags |= TRACKING;
+      if (this._globalVersion !== globalVersion) {
+        this._flags |= OUTDATED;
+      }
+
+      for (let node = this._sources; node !== undefined; node = node._nextSource) {
+        node._source._subscribe(node);
+      }
+    }
+    State.prototype._subscribe.call(this, node);
+  }
+
+  _unsubscribe(node: Edge): void {
+    if (this._targets !== undefined) {
+      State.prototype._unsubscribe.call(this, node);
+
+      // Losing the last target unsubscribes from the sources too, so an
+      // unreferenced subgraph can be garbage collected.
+      if (this._targets === undefined) {
+        this._flags &= ~TRACKING;
+
+        for (let node = this._sources; node !== undefined; node = node._nextSource) {
+          node._source._unsubscribe(node);
+        }
+      }
+    }
+  }
+
+  _notify(): void {
+    if (!(this._flags & NOTIFIED)) {
+      this._flags |= OUTDATED | NOTIFIED;
+
+      for (let node = this._targets; node !== undefined; node = node._nextTarget) {
+        node._target._notify();
+      }
+    }
   }
 
   get(): T {
     if (!(this instanceof Computed)) {
       throw new TypeError('Invalid receiver');
+    }
+    if (notifying) {
+      throw new Error('Reads from signals not permitted during Watcher callback');
     }
     if (this._flags & RUNNING) {
       throw new Error('Detected cycle in computations.');
@@ -310,12 +489,106 @@ export class Computed<T> {
   }
 }
 
+function checkWatchArguments(watcher: unknown, signals: unknown[]): void {
+  if (!(watcher instanceof Watcher)) {
+    throw new TypeError('Invalid receiver');
+  }
+  for (const signal of signals) {
+    if (!(signal instanceof State || signal instanceof Computed)) {
+      throw new TypeError('Invalid argument');
+    }
+  }
+}
+
+export class Watcher {
+  _fn: (this: Watcher) => void;
+  // Head of the watched signals list, in watch order.
+  _sources?: Edge;
+  _flags: number;
+
+  constructor(notify: (this: Watcher) => void) {
+    this._fn = notify;
+    this._sources = undefined;
+    this._flags = 0;
+  }
+
+  _notify(): void {
+    if (!(this._flags & NOTIFIED)) {
+      this._flags |= NOTIFIED;
+      notifiedWatchers.push(this);
+    }
+  }
+
+  watch(...signals: (State<any> | Computed<any>)[]): void {
+    checkWatchArguments(this, signals);
+    this._flags &= ~NOTIFIED;
+    for (const signal of signals) {
+      let node = this._sources;
+      let tail: Edge | undefined = undefined;
+      while (node !== undefined && node._source !== signal) {
+        tail = node;
+        node = node._nextSource;
+      }
+      if (node === undefined) {
+        node = {
+          _version: 0,
+          _source: signal,
+          _prevSource: tail,
+          _nextSource: undefined,
+          _target: this,
+          _prevTarget: undefined,
+          _nextTarget: undefined,
+          _rollbackNode: undefined,
+        };
+        if (tail !== undefined) {
+          tail._nextSource = node;
+        } else {
+          this._sources = node;
+        }
+        signal._subscribe(node);
+      }
+    }
+  }
+
+  unwatch(...signals: (State<any> | Computed<any>)[]): void {
+    checkWatchArguments(this, signals);
+    for (let node = this._sources; node !== undefined; node = node._nextSource) {
+      if (signals.includes(node._source)) {
+        node._source._unsubscribe(node);
+
+        if (node._prevSource !== undefined) {
+          node._prevSource._nextSource = node._nextSource;
+        } else {
+          this._sources = node._nextSource;
+        }
+        if (node._nextSource !== undefined) {
+          node._nextSource._prevSource = node._prevSource;
+        }
+      }
+    }
+  }
+
+  getPending(): Computed<any>[] {
+    if (!(this instanceof Watcher)) {
+      throw new TypeError('Invalid receiver');
+    }
+    const pending = [];
+    for (let node = this._sources; node !== undefined; node = node._nextSource) {
+      const source = node._source;
+      if (source instanceof Computed && source._flags & OUTDATED) {
+        pending.push(source);
+      }
+    }
+    return pending;
+  }
+}
+
 export function currentComputed(): Computed<any> | undefined {
   return evalContext instanceof Computed ? evalContext : undefined;
 }
 
 export function introspectSources(sink: unknown): unknown[] {
-  if (!(sink instanceof Computed)) {
+  if (!(sink instanceof Computed || sink instanceof Watcher)) {
     throw new TypeError('Invalid argument');
   }
   const sources = [];
@@ -326,10 +599,31 @@ export function introspectSources(sink: unknown): unknown[] {
 }
 
 export function hasSources(sink: unknown): boolean {
-  if (!(sink instanceof Computed)) {
+  if (!(sink instanceof Computed || sink instanceof Watcher)) {
     throw new TypeError('Invalid argument');
   }
   return sink._sources !== undefined;
+}
+
+export function introspectSinks(signal: unknown): unknown[] {
+  if (!(signal instanceof State || signal instanceof Computed)) {
+    throw new TypeError('Invalid argument');
+  }
+  // Only spec objects count as sinks. Any other kind of target stays hidden.
+  const sinks = [];
+  for (let node = signal._targets; node !== undefined; node = node._nextTarget) {
+    if (node._target instanceof Computed || node._target instanceof Watcher) {
+      sinks.push(node._target);
+    }
+  }
+  return sinks;
+}
+
+export function hasSinks(signal: unknown): boolean {
+  if (!(signal instanceof State || signal instanceof Computed)) {
+    throw new TypeError('Invalid argument');
+  }
+  return signal._targets !== undefined;
 }
 
 export function isState(x: unknown): boolean {
@@ -338,4 +632,8 @@ export function isState(x: unknown): boolean {
 
 export function isComputed(x: unknown): boolean {
   return x instanceof Computed;
+}
+
+export function isWatcher(x: unknown): boolean {
+  return x instanceof Watcher;
 }
