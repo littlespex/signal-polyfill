@@ -70,18 +70,24 @@ There are three modes:
 ```js
 import { Signal, effect, setScheduler, flush } from "signal-polyfill";
 
-// Flush from a media event instead of a microtask.
+// Writes queue effects. Nothing runs until the app calls flush().
 setScheduler(null);
-video.addEventListener("timeupdate", () => flush());
 
+const video = document.querySelector("video");
 const time = new Signal.State(0);
-effect(() => console.log(time.get()));
+
+effect(() => console.log(time.get())); // Logs 0 immediately.
+
+video.addEventListener("timeupdate", () => {
+  time.set(video.currentTime); // Queues the effect.
+  flush(); // Runs it, so the effect logs the new time.
+});
 ```
 
 A few behaviors are worth knowing before you rely on them.
 
 - Order: when a signal is written, the effects that read that signal directly run in the order they subscribed. Order is otherwise unspecified: across effects that reach the signal through different computeds, and across several writes before one flush.
-- Nested flushes: `flush()` does nothing when called from inside an effect, because the running flush picks up anything newly queued. It also does nothing when called from inside a `Signal.subtle.Watcher` notify callback, because signals cannot be read there. The pending effects run at the next flush.
+- Nested flushes: `flush()` does nothing when a flush is already running, for example when an effect that is re-running during a flush calls it, and it does nothing inside a `Signal.subtle.Watcher` notify callback, where signals cannot be read. In both cases the pending effects run at the next flush. An effect's first run happens inside `effect()`, not inside a flush, so a `flush()` there runs the pending effects.
 - Errors: every pending effect runs even if one throws, and `flush()` then rethrows the first error. Under the default scheduler that error is an uncaught exception in the microtask. An effect that throws on its first run is disposed, and the error is thrown from `effect()`. Effects that keep triggering themselves or each other stop after 100 passes with an error whose message contains "cycle". That includes the self-triggering example above.
 - Synchronous scheduler: the flush runs inside whichever call finished the outermost write, computation or batch, so an effect's error surfaces from that call.
 

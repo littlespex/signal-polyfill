@@ -62,7 +62,24 @@ The benchmark total moves a lot between runs on this machine, mostly in the dyna
 | 4                   | 12,545              | 12,927            | 0.97              | no           | yes               |
 | 5                   | 13,192              | 8,082             | 1.63              | no           | no                |
 
-The polyfill median is 12,579 ms and the preact median is 8,245 ms, a ratio of 1.53. Run 4 is the only run where preact itself was slow (dynamic graphs 10,809 ms against about 6,000 ms in the others), so the 1.3x test passed there because the baseline moved, not because the polyfill got faster. The polyfill is above 10,464 ms in four of five runs and above 1.3x preact in three of five, so the target is reported as missed. Propagation stays between 2,069 and 2,084 ms against 1,965 to 1,999 ms for preact, and create and update are in the same range as preact. The gap is in the dynamic graphs group.
+Per-group figures for the same five runs, in ms, copied from the script output:
+
+| run | library  | propagation | create | update | dynamic | total  |
+| --- | -------- | ----------- | ------ | ------ | ------- | ------ |
+| 1   | polyfill | 2,073       | 83     | 23     | 14,577  | 16,756 |
+| 1   | preact   | 1,975       | 101    | 22     | 6,549   | 8,647  |
+| 2   | polyfill | 2,084       | 115    | 25     | 7,822   | 10,046 |
+| 2   | preact   | 1,970       | 113    | 20     | 6,143   | 8,245  |
+| 3   | polyfill | 2,074       | 58     | 23     | 10,424  | 12,579 |
+| 3   | preact   | 1,975       | 99     | 20     | 6,043   | 8,136  |
+| 4   | polyfill | 2,069       | 59     | 21     | 10,396  | 12,545 |
+| 4   | preact   | 1,999       | 98     | 20     | 10,809  | 12,927 |
+| 5   | polyfill | 2,073       | 63     | 22     | 11,034  | 13,192 |
+| 5   | preact   | 1,965       | 103    | 20     | 5,995   | 8,082  |
+
+The polyfill median is 12,579 ms and the preact median is 8,245 ms, a ratio of 1.53. Run 4 is the only run where preact itself was slow (dynamic graphs 10,809 ms, against 5,995 to 6,549 ms in the other four), so the 1.3x test passed there because the baseline moved, not because the polyfill got faster. The polyfill is above 10,464 ms in four of five runs and above 1.3x preact in three of five, so the target is reported as missed.
+
+The polyfill's propagation is steady at 2,069 to 2,084 ms against 1,965 to 1,999 ms for preact. Its update is 21 to 25 ms against 20 to 22 ms. Its create is 58 to 115 ms against 98 to 113 ms, so it is below preact in four runs and above it in one (run 2, 115 ms against 113 ms). The gap is in the dynamic graphs group, where the polyfill ranges from 7,822 to 14,577 ms against 5,995 to 6,549 ms for preact outside run 4.
 
 ### Size and line count
 
