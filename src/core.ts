@@ -251,22 +251,19 @@ function runWatchers(): void {
 }
 
 export class State<T> {
-  _value: T;
+  declare _value: T;
   // Never negative, because edges use -1 as a marker.
-  _version: number;
+  _version = 0;
   // The edge for the current evaluation context, if it has read this signal.
   _node?: Edge;
   // Head of the targets list. Defined exactly while the signal is live.
   _targets?: Edge;
-  _equals: (a: T, b: T) => boolean;
-  _watched?: () => void;
-  _unwatched?: () => void;
+  declare _equals: (a: T, b: T) => boolean;
+  declare _watched?: () => void;
+  declare _unwatched?: () => void;
 
   constructor(value: T, options?: Options<T>) {
     this._value = value;
-    this._version = 0;
-    this._node = undefined;
-    this._targets = undefined;
     this._equals = options?.equals ?? Object.is;
     this._watched = options?.[WATCHED];
     this._unwatched = options?.[UNWATCHED];
@@ -362,29 +359,22 @@ export class State<T> {
 }
 
 export class Computed<T> {
-  _fn: () => T;
+  declare _fn: () => T;
   // The last value, or the last error when HAS_ERROR is set.
   _value: unknown;
-  _version: number;
+  _version = 0;
   _node?: Edge;
   _targets?: Edge;
   // Head of the sources list, or its tail while evaluating.
   _sources?: Edge;
-  _globalVersion: number;
-  _flags: number;
-  _equals: (a: T, b: T) => boolean;
-  _watched?: () => void;
-  _unwatched?: () => void;
+  _globalVersion = globalVersion - 1;
+  _flags = OUTDATED;
+  declare _equals: (a: T, b: T) => boolean;
+  declare _watched?: () => void;
+  declare _unwatched?: () => void;
 
   constructor(fn: () => T, options?: Options<T>) {
     this._fn = fn;
-    this._value = undefined;
-    this._version = 0;
-    this._node = undefined;
-    this._targets = undefined;
-    this._sources = undefined;
-    this._globalVersion = globalVersion - 1;
-    this._flags = OUTDATED;
     this._equals = options?.equals ?? Object.is;
     this._watched = options?.[WATCHED];
     this._unwatched = options?.[UNWATCHED];
@@ -538,17 +528,14 @@ function checkWatchArguments(watcher: unknown, signals: unknown[]): void {
 }
 
 export class Watcher {
-  _fn: (this: Watcher) => void;
+  declare _fn: (this: Watcher) => void;
   // Head and tail of the watched signals list, in watch order.
   _sources?: Edge;
   _tail?: Edge;
-  _flags: number;
+  _flags = 0;
 
   constructor(notify: (this: Watcher) => void) {
     this._fn = notify;
-    this._sources = undefined;
-    this._tail = undefined;
-    this._flags = 0;
   }
 
   _notify(): void {
@@ -680,20 +667,16 @@ function endEffect(effect: Effect, prevContext: Computed<any> | Effect | undefin
 }
 
 class Effect {
-  _fn?: EffectFn;
+  declare _fn?: EffectFn;
   _cleanup?: () => void;
   // Head of the sources list, or its tail while running.
   _sources?: Edge;
   _nextBatchedEffect?: Effect;
-  _flags: number;
+  // An effect is always live, so it subscribes to each source as it reads it.
+  _flags = TRACKING;
 
   constructor(fn: EffectFn) {
     this._fn = fn;
-    this._cleanup = undefined;
-    this._sources = undefined;
-    this._nextBatchedEffect = undefined;
-    // An effect is always live, so it subscribes to each source as it reads it.
-    this._flags = TRACKING;
   }
 
   _callback(): void {
