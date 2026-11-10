@@ -14,8 +14,7 @@ This is a polyfill for the `Signal` API.
 - Use `Signal.Computed(callback)` to define a computation based on state or other computations flowing through the graph.
 
 ```js
-import { Signal } from "signal-polyfill";
-import { effect } from "./effect.js";
+import { Signal, effect } from "signal-polyfill";
 
 const counter = new Signal.State(0);
 const isEven = new Signal.Computed(() => (counter.get() & 1) == 0);
@@ -30,7 +29,7 @@ setInterval(() => counter.set(counter.get() + 1), 1000); // Changes the counter 
 // ...
 ```
 
-The signal proposal does not include an `effect` API, since such APIs are often deeply integrated with rendering and batch strategies that are highly framework/library dependent. However, the proposal does seek to define a set of primitives that library authors can use to implement their own effects.
+The signal proposal does not include an `effect` API, since such APIs are often deeply integrated with rendering and batch strategies that are highly framework/library dependent. However, the proposal does seek to define a set of primitives that library authors can use to implement their own effects. This fork adds its own `effect`, described under [Effects and scheduling](#effects-and-scheduling).
 
 When working directly with library effect APIs, always be sure to understand the behavior of the `effect` implementation. While the signal algorithm is standardized, effects are not and may vary. To illustrate this, have a look at this code:
 
@@ -42,54 +41,51 @@ counter.get(); // 1
 
 Depending on how the effect is implemented, the above code could result in an infinite loop. It's also important to note that running the effect, in this case, causes an immediate invocation of the callback, changing the value of the counter.
 
-### Creating a simple effect
+### Effects and scheduling
 
-- You can use `Signal.subtle.Watch(callback)` combined with `Signal.Computed(callback)` to create a simple _effect_ implementation.
-- The `Signal.subtle.Watch` `callback` is invoked synchronously when a watched signal becomes dirty.
-- To batch effect updates, library authors are expected to implement their own schedulers.
-- Use `Signal.subtle.Watch#getPending()` to retrieve an array of dirty signals.
-- Calling `Signal.subtle.Watch#watch()` with no arguments will re-watch the list of tracked signals again.
+The signal proposal does not include `effect`, `batch`, `flush` or `setScheduler`. These four are additions in this fork and are not part of the TC39 proposal. They are exported beside `Signal`, not inside it.
+
+```ts
+type Scheduler = (flush: () => void) => void;
+
+effect(fn: () => void | (() => void)): () => void;
+batch<T>(fn: () => T): T;
+flush(): void;
+setScheduler(scheduler: Scheduler | null): void;
+```
+
+- `effect(fn)` runs `fn` once, immediately, and runs it again whenever a signal it read changes. It returns a function that disposes the effect. If `fn` returns a function, that function is the effect's cleanup. It runs before the next run and when the effect is disposed.
+- `batch(fn)` runs `fn` and returns its result. Writes made inside `fn` queue effects, and the scheduler is asked once, when the outermost `batch` ends, not after each write.
+- `flush()` runs the pending effects now.
+- `setScheduler(scheduler)` decides when pending effects run. When an effect becomes pending, the scheduler is called with a `flush` function, and it decides when to call it. Passing `null` removes the scheduler, so nothing runs until the app calls `flush()`.
+
+There are three modes:
+
+| mode                | install                                   | effects run                                                 |
+| ------------------- | ----------------------------------------- | ----------------------------------------------------------- |
+| microtask (default) | nothing                                   | once, after the current task                                |
+| synchronous         | `setScheduler((flush) => flush())`        | at the end of the outermost write, computation or `batch`   |
+| manual              | `setScheduler(null)`, then call `flush()` | when the app calls `flush()`, for example from `timeupdate` |
 
 ```js
-import { Signal } from "signal-polyfill";
+import { Signal, effect, setScheduler, flush } from "signal-polyfill";
 
-let needsEnqueue = true;
+// Flush from a media event instead of a microtask.
+setScheduler(null);
+video.addEventListener("timeupdate", () => flush());
 
-const w = new Signal.subtle.Watcher(() => {
-  if (needsEnqueue) {
-    needsEnqueue = false;
-    queueMicrotask(processPending);
-  }
-});
-
-function processPending() {
-  needsEnqueue = true;
-
-  for (const s of w.getPending()) {
-    s.get();
-  }
-
-  w.watch();
-}
-
-export function effect(callback) {
-  let cleanup;
-
-  const computed = new Signal.Computed(() => {
-    typeof cleanup === "function" && cleanup();
-    cleanup = callback();
-  });
-
-  w.watch(computed);
-  computed.get();
-
-  return () => {
-    w.unwatch(computed);
-    typeof cleanup === "function" && cleanup();
-    cleanup = undefined;
-  };
-}
+const time = new Signal.State(0);
+effect(() => console.log(time.get()));
 ```
+
+A few behaviors are worth knowing before you rely on them.
+
+- Order: when a signal is written, the effects that read that signal directly run in the order they subscribed. Order is otherwise unspecified: across effects that reach the signal through different computeds, and across several writes before one flush.
+- Nested flushes: `flush()` does nothing when called from inside an effect, because the running flush picks up anything newly queued. It also does nothing when called from inside a `Signal.subtle.Watcher` notify callback, because signals cannot be read there. The pending effects run at the next flush.
+- Errors: every pending effect runs even if one throws, and `flush()` then rethrows the first error. Under the default scheduler that error is an uncaught exception in the microtask. An effect that throws on its first run is disposed, and the error is thrown from `effect()`. Effects that keep triggering themselves or each other stop after 100 passes with an error whose message contains "cycle". That includes the self-triggering example above.
+- Synchronous scheduler: the flush runs inside whichever call finished the outermost write, computation or batch, so an effect's error surfaces from that call.
+
+To build effects with different semantics, `Signal.subtle.Watcher` and `Signal.Computed` are the primitives the proposal provides. Use `Signal.subtle.Watcher#getPending()` to retrieve the dirty signals and `Signal.subtle.Watcher#watch()` with no arguments to re-arm the notify callback.
 
 > [!IMPORTANT]
 > The `Signal.subtle` APIs are so named in order to communicate that their correct use requires careful attention to detail. These APIs are not targeted at application-level code, but rather at framework/library authors.

@@ -1,5 +1,8 @@
 import {ReactiveFramework} from 'js-reactivity-benchmark';
-import {Signal} from '../../src/index.js';
+import {Signal, batch, effect, setScheduler} from '../../src/index.js';
+
+// The benchmark reads pull counts after every write, so effects run synchronously.
+setScheduler((f) => f());
 
 export const tc39SignalsProposalStage0: ReactiveFramework = {
   name: 'TC39 Signals Polyfill',
@@ -16,50 +19,7 @@ export const tc39SignalsProposalStage0: ReactiveFramework = {
       read: () => c.get(),
     };
   },
-  effect: (fn) => effect(fn),
-  withBatch: (fn) => {
-    fn();
-    processPending();
-  },
+  effect: (fn) => void effect(() => void fn()),
+  withBatch: (fn) => void batch(fn),
   withBuild: (fn) => fn(),
 };
-
-let needsEnqueue = false;
-
-const w = new Signal.subtle.Watcher(() => {
-  if (needsEnqueue) {
-    needsEnqueue = false;
-    (async () => {
-      await Promise.resolve();
-      // next micro queue
-      processPending();
-    })();
-  }
-});
-
-function processPending() {
-  needsEnqueue = true;
-
-  for (const s of w.getPending()) {
-    s.get();
-  }
-
-  w.watch();
-}
-
-export function effect(callback: any) {
-  let cleanup: any;
-
-  const computed = new Signal.Computed(() => {
-    typeof cleanup === 'function' && cleanup();
-    cleanup = callback();
-  });
-
-  w.watch(computed);
-  computed.get();
-
-  return () => {
-    w.unwatch(computed);
-    typeof cleanup === 'function' && cleanup();
-  };
-}

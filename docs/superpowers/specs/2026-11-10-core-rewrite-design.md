@@ -361,3 +361,27 @@ Found while writing the build plan. Where these differ from the text above, thes
 - `setScheduler` asks the new scheduler at once when effects are already pending.
 - The core is a port of the algorithm in `@preact/signals-core`, which is MIT
   licensed. `src/core.ts` carries its copyright and permission notice.
+
+## Amendments from execution
+
+Decided while building. Where these differ from the text above, these win.
+
+- Goal 4 has one exception. Two assertions in `tests/Signal/ported/vue.test.ts` now
+  expect Vue's own values (`'1foo'` and `'1,0'`). The old values pinned an artifact of
+  the Angular graph: a Computed counted as clean at the end of its own evaluation even
+  when a nested computed had written one of its sources. Keeping that needed three
+  special cases and still left watched and unwatched computeds disagreeing.
+  `Computed._refresh` follows the reference order with no exceptions.
+- Effect order is narrower than "creation order". When a signal is written, the
+  effects that read it directly run in the order they subscribed. Order is otherwise
+  unspecified: across effects that reach the signal through different computeds, and
+  across several writes before one flush. Strict creation order would cost a field per effect and a
+  sort per flush pass.
+- `flush()` does nothing while a Watcher notify callback is running. The write that
+  triggered the callback asks the scheduler again afterwards.
+- A scheduler that throws does not stop later flushes: the request flag is reset and
+  the error propagates from the call that asked.
+- Goal 6 is missed. The core and shell are well over 450 lines excluding comments; the
+  measured count is in `tests/benchmarks/compare/README.md`. The 450 figure was an
+  estimate made before the port; the reference implements the same features in a
+  similar number of lines.
