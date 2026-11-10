@@ -33,7 +33,7 @@ importers:
         specifier: ^0.9.0
         version: 0.9.0(encoding@0.1.13)
       typescript:
-        specifier: latest
+        specifier: ^5.4.0
         version: 5.4.4
       vite:
         specifier: ^5.2.6

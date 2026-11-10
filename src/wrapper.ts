@@ -15,9 +15,8 @@
  * limitations under the License.
  */
 
-import {computedGet, createComputed, type ComputedNode} from './computed.js';
+import {computedGet, COMPUTED_NODE, type ComputedNode} from './computed.js';
 import {
-  SIGNAL,
   getActiveConsumer,
   isInNotificationPhase,
   producerAccessed,
@@ -28,9 +27,17 @@ import {
   assertProducerNode,
   producerRemoveLiveConsumerAtIndex,
 } from './graph.js';
-import {createSignal, signalGetFn, signalSetFn, type SignalNode} from './signal.js';
+import {SIGNAL_NODE, signalGetFn, signalSetFn, type SignalNode} from './signal.js';
 
 const NODE: unique symbol = Symbol('node');
+
+function throwInvalidReceiver(): never {
+  throw new TypeError('Invalid receiver');
+}
+
+function throwInvalidArgument(): never {
+  throw new TypeError('Invalid argument');
+}
 
 // eslint-disable-next-line @typescript-eslint/no-namespace
 export namespace Signal {
@@ -48,8 +55,8 @@ export namespace Signal {
     }
 
     constructor(initialValue: T, options: Signal.Options<T> = {}) {
-      const ref = createSignal<T>(initialValue);
-      const node: SignalNode<T> = ref[SIGNAL];
+      const node: SignalNode<T> = Object.create(SIGNAL_NODE);
+      node.value = initialValue;
       this[NODE] = node;
       node.wrapper = this;
       if (options) {
@@ -63,12 +70,12 @@ export namespace Signal {
     }
 
     public get(): T {
-      if (!isState(this)) throw new TypeError('Wrong receiver type for Signal.State.prototype.get');
+      if (!isState(this)) throwInvalidReceiver();
       return (signalGetFn<T>).call(this[NODE]);
     }
 
     public set(newValue: T): void {
-      if (!isState(this)) throw new TypeError('Wrong receiver type for Signal.State.prototype.set');
+      if (!isState(this)) throwInvalidReceiver();
       if (isInNotificationPhase()) {
         throw new Error('Writes to signals not permitted during Watcher callback');
       }
@@ -90,8 +97,8 @@ export namespace Signal {
     // Create a Signal which evaluates to the value returned by the callback.
     // Callback is called with this signal as the parameter.
     constructor(computation: () => T, options?: Signal.Options<T>) {
-      const ref = createComputed<T>(computation);
-      const node = ref[SIGNAL];
+      const node: ComputedNode<T> = Object.create(COMPUTED_NODE);
+      node.computation = computation;
       node.consumerAllowSignalWrites = true;
       this[NODE] = node;
       node.wrapper = this;
@@ -106,8 +113,7 @@ export namespace Signal {
     }
 
     get(): T {
-      if (!isComputed(this))
-        throw new TypeError('Wrong receiver type for Signal.Computed.prototype.get');
+      if (!isComputed(this)) throwInvalidReceiver();
       return computedGet(this[NODE]);
     }
   }
@@ -136,7 +142,7 @@ export namespace Signal {
     // during the last time it was evaluated
     export function introspectSources(sink: AnySink): AnySignal[] {
       if (!isComputed(sink) && !isWatcher(sink)) {
-        throw new TypeError('Called introspectSources without a Computed or Watcher argument');
+        throwInvalidArgument();
       }
       return sink[NODE].producerNode?.map((n) => n.wrapper) ?? [];
     }
@@ -146,7 +152,7 @@ export namespace Signal {
     // Note: Only watched Computed signals will be in this list.
     export function introspectSinks(signal: AnySignal): AnySink[] {
       if (!isComputed(signal) && !isState(signal)) {
-        throw new TypeError('Called introspectSinks without a Signal argument');
+        throwInvalidArgument();
       }
       return signal[NODE].liveConsumerNode?.map((n) => n.wrapper) ?? [];
     }
@@ -154,7 +160,7 @@ export namespace Signal {
     // True iff introspectSinks() is non-empty
     export function hasSinks(signal: AnySignal): boolean {
       if (!isComputed(signal) && !isState(signal)) {
-        throw new TypeError('Called hasSinks without a Signal argument');
+        throwInvalidArgument();
       }
       const liveConsumerNode = signal[NODE].liveConsumerNode;
       if (!liveConsumerNode) return false;
@@ -164,7 +170,7 @@ export namespace Signal {
     // True iff introspectSources() is non-empty
     export function hasSources(signal: AnySink): boolean {
       if (!isComputed(signal) && !isWatcher(signal)) {
-        throw new TypeError('Called hasSources without a Computed or Watcher argument');
+        throwInvalidArgument();
       }
       const producerNode = signal[NODE].producerNode;
       if (!producerNode) return false;
@@ -195,7 +201,7 @@ export namespace Signal {
       #assertSignals(signals: AnySignal[]): void {
         for (const signal of signals) {
           if (!isComputed(signal) && !isState(signal)) {
-            throw new TypeError('Called watch/unwatch without a Computed or State argument');
+            throwInvalidArgument();
           }
         }
       }
@@ -206,7 +212,7 @@ export namespace Signal {
       // the notify callback will be invoked again.
       watch(...signals: AnySignal[]): void {
         if (!isWatcher(this)) {
-          throw new TypeError('Called unwatch without Watcher receiver');
+          throwInvalidReceiver();
         }
         this.#assertSignals(signals);
 
@@ -222,7 +228,7 @@ export namespace Signal {
       // Remove these signals from the watched set (e.g., for an effect which is disposed)
       unwatch(...signals: AnySignal[]): void {
         if (!isWatcher(this)) {
-          throw new TypeError('Called unwatch without Watcher receiver');
+          throwInvalidReceiver();
         }
         this.#assertSignals(signals);
 
@@ -256,7 +262,7 @@ export namespace Signal {
       // to be re-evaluated
       getPending(): Computed<any>[] {
         if (!isWatcher(this)) {
-          throw new TypeError('Called getPending without Watcher receiver');
+          throwInvalidReceiver();
         }
         const node = this[NODE];
         return node.producerNode!.filter((n) => n.dirty).map((n) => n.wrapper);

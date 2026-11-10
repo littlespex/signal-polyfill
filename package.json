@@ -14,8 +14,18 @@
     "EisenbergEffect"
   ],
   "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "vite build",
     "dev": "vite",
@@ -37,7 +47,7 @@
     "expect-type": "^1.0.0",
     "prettier": "^3.2.5",
     "release-plan": "^0.9.0",
-    "typescript": "latest",
+    "typescript": "^5.4.0",
     "vite": "^5.2.6",
     "vite-plugin-dts": "^3.7.3",
     "vitest": "^1.4.0",
