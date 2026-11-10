@@ -24,16 +24,16 @@ Measured on Node 24.22.1 on an Apple M1 Pro laptop, 2026-11-10, at commit 5ff884
 
 - "before rewrite" is the old Angular-based graph with the Watcher-based adapter, measured with the same scripts on the same machine before the rewrite. Its benchmark figure is a single run. Its size was measured again at the ES2022 target, from the source at commit cabb083.
 - "preact" and "after rewrite" come from the measurements above. Size and heap are one run of each script. The benchmark rows are medians of the five runs listed below.
-- The size figures were measured again after the build target moved from ES2019 to ES2022. The heap and benchmark bundles are built without a target, so those figures did not change.
+- The size figures were measured again after the build target moved from ES2019 to ES2022 and the classes moved to class field initializers. The heap and benchmark bundles are built without a target, so those figures did not change.
 
 | measure                                     | before rewrite   | preact | after rewrite | target                                          | met or missed |
 | ------------------------------------------- | ---------------- | ------ | ------------- | ----------------------------------------------- | ------------- |
-| size, min+gzip (B)                          | 2,540            | 2,114  | 3,048         | 2,000 or less                                   | missed        |
+| size, min+gzip (B)                          | 2,540            | 2,114  | 3,050         | 2,000 or less                                   | missed        |
 | size, min+gzip, `--legal-comments=none` (B) | 2,082            | 2,114  | 2,305         | 2,000 or less                                   | missed        |
 | heap per state + computed + effect (B)      | 3,504            | 1,084  | 1,060         | 1,434 or less                                   | met           |
 | benchmark total, median of five runs (ms)   | 32,914 (one run) | 8,192  | 11,258        | 10,464 or less, or 10,650 (1.3x preact's 8,192) | missed        |
 | benchmark dynamic group, median (ms)        | 26,893 (one run) | 6,104  | 9,168         | none                                            |               |
-| non-comment lines                           | not measured     | 750    | 750           | 450 or less                                     | missed        |
+| non-comment lines                           | not measured     | 750    | 733           | 450 or less                                     | missed        |
 
 The benchmark medians miss both forms of the target: 11,258 ms is above 10,464 ms and above 10,650 ms. The ratio of the medians is 1.37.
 
@@ -80,12 +80,24 @@ Outside the dynamic group the two are close in every run. Propagation is 2,008 t
 
 | bundle                                                        | default (B) | `--legal-comments=none` (B) |
 | ------------------------------------------------------------- | ----------- | --------------------------- |
-| `src/index.ts`, as `size.sh` measures it                      | 3,048       | 2,305                       |
-| only `Signal` re-exported (the four fork exports tree-shaken) | 2,745       | 2,010                       |
+| `src/index.ts`, as `size.sh` measures it                      | 3,050       | 2,305                       |
+| only `Signal` re-exported (the four fork exports tree-shaken) | 2,748       | 2,008                       |
 | preact, as `size.sh` measures it                              | 2,114       | 2,114                       |
 
 The "only `Signal`" row is not part of the script output. It was measured with the same esbuild flags and `gzip -9`, bundling `export {Signal} from './src/index.ts'`.
 
-esbuild keeps the `@license` block at the top of `src/core.ts` (the MIT notice for the code adapted from `@preact/signals-core`) at the end of the bundle, and it costs 743 B gzipped. The preact bundle carries no license text, so its two figures are equal. With the notice excluded the polyfill is 2,305 B, which is still 305 B above the 2,000 B target and 191 B above preact. The four fork exports account for about 300 B (295 B without the notice). At this target the old graph is 2,082 B without license comments, because it used class fields, which ES2022 output keeps as they are. So the rewrite with its four fork exports is 223 B larger than the old graph, and the `Signal`-only bundle is 72 B smaller. The target is reported as missed both ways.
+esbuild keeps the `@license` block at the top of `src/core.ts` (the MIT notice for the code adapted from `@preact/signals-core`) at the end of the bundle, and it costs 745 B gzipped. The preact bundle carries no license text, so its two figures are equal. With the notice excluded the polyfill is 2,305 B, which is still 305 B above the 2,000 B target and 191 B above preact. The four fork exports account for about 300 B (297 B without the notice). At this target the old graph is 2,082 B without license comments, because its class fields and private names no longer need helper functions. So the rewrite with its four fork exports is 223 B larger than the old graph, and the `Signal`-only bundle is 74 B smaller. The target is reported as missed both ways.
 
-The line count is 696 non-comment, non-blank lines in `src/core.ts` and 54 in `src/index.ts`, 750 together. The count strips `/* */` blocks and full-line `//` comments and drops blank lines, so a line of code with a trailing comment still counts. A second count with `grep -vE '^\s*$|^\s*//|^\s*/\*|^\s*\*'` gives the same totals. Preact's `src/index.ts` (1.14.5) has 750 lines by the `grep` count and 754 by the first count: four of its lines start with an `@__INLINE__` comment before a `startBatch()` call, and the `grep` count drops them. The 450 figure was an estimate made before the port, not a measured limit.
+The line count is 679 non-comment, non-blank lines in `src/core.ts` and 54 in `src/index.ts`, 733 together. The count strips `/* */` blocks and full-line `//` comments and drops blank lines, so a line of code with a trailing comment still counts. A second count with `grep -vE '^\s*$|^\s*//|^\s*/\*|^\s*\*'` gives the same totals. Preact's `src/index.ts` (1.14.5) has 750 lines by the `grep` count and 754 by the first count: four of its lines start with an `@__INLINE__` comment before a `startBatch()` call, and the `grep` count drops them. The 450 figure was an estimate made before the port, not a measured limit.
+
+### Class fields
+
+The four classes set their constant initial values with class field initializers. Three builds of the benchmark were compared in five rounds, with the order rotated each round: constructor assignments (the previous code), class fields as written, and class fields lowered by esbuild at `--target=es2021`, which is what a bundler does for a target below ES2022.
+
+| build                   | total, median (ms) | create group, median (ms) | min+gzip at ES2019 (B) |
+| ----------------------- | ------------------ | ------------------------- | ---------------------- |
+| constructor assignments | 10,916             | 57                        | 2,327                  |
+| class fields            | 10,917             | 57                        | not applicable         |
+| class fields, lowered   | 11,030             | 202                       | 2,442                  |
+
+Totals were 10,887 to 11,965 ms for assignments, 10,620 to 11,685 ms for class fields and 10,417 to 11,527 ms for lowered class fields, at a load average of 3.6 to 6.6. Class fields as written measure the same as assignments. A bundler that lowers them calls a helper for each field, which makes the bundle 115 B larger and node creation about 3.5 times slower. Sizes in this table exclude license comments.

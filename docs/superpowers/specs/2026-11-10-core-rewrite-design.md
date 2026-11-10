@@ -388,12 +388,12 @@ Decided while building. Where these differ from the text above, these win.
   estimate made before the port; the reference implements the same features in a
   similar number of lines.
 - Measured after the final fix wave (method and per-run figures in
-  `tests/benchmarks/compare/README.md`): the bundle is 3,048 B min+gzip, or 2,305 B
+  `tests/benchmarks/compare/README.md`): the bundle is 3,050 B min+gzip, or 2,305 B
   without the license notice (both at the ES2022 target, see below), so the size target of goal 5 is missed either way. Heap
   is 1,060 B per state, computed and effect against 1,084 B for preact, so that
   target is met. The benchmark median of five alternating runs is 11,258 ms against
   8,192 ms for preact, a ratio of 1.37, so the 1.3x target is missed. The core and
-  shell have 750 non-comment lines, the same as the reference by the `grep` count, so
+  shell have 733 non-comment lines against 750 for the reference by the `grep` count, so
   goal 6 stays missed.
 - `Computed._refresh` is split in two for V8's inlining budget. `_refresh` keeps the
   fast checks, and `_recompute` holds the source check and the recompute. Behavior is
@@ -412,11 +412,16 @@ Decided while building. Where these differ from the text above, these win.
   object with a `get` method does not type-check as a signal. The brands add nothing to `dist/index.js`.
 - The build target is ES2022, not ES2019. This was decided after hand-over and
   replaces goal 7 and the ES2019 lines above. `tsconfig.json`, `vite.config.ts` and
-  `size.sh` use it. The source still has no class field initializers and no `#private`
-  names, so `dist/index.js` is the same file that an ES2021 target produces. It keeps
-  `?.` and `??`, so it needs Chromium 80 or Safari 13.1 unless the app lowers the
-  syntax in its own build. A minifier that targets ES2021 or later can also emit `??=`,
-  which needs Chromium 85 or Safari 14. The change saves 22 B gzipped (2,327 B to
-  2,305 B without the license notice). The old graph gains more from this target: it
-  is 2,082 B without license comments, because it used class fields. The output still
-  has no helper functions.
+  `size.sh` use it. Moving from ES2019 to ES2022 saves 22 B gzipped (2,327 B to
+  2,305 B without the license notice). The old graph gains more: it is 2,082 B without
+  license comments, because its class fields and private names no longer need helper
+  functions.
+- The four classes set constant initial values with class field initializers, and
+  `useDefineForClassFields` is on. This was also decided after hand-over. It removes 17
+  lines and leaves the gzipped size at 2,305 B. `dist/index.js` has class fields, `?.`
+  and `??`, and no helper functions. The containing app transpiles the library for its
+  own browser targets. A bundler that lowers class fields calls a helper for each
+  field: bundled at ES2019 the library is 2,442 B against 2,327 B with constructor
+  assignments, and the create group of the benchmark takes 202 ms against 57 ms. Class
+  fields as written measure the same as constructor assignments (medians of five
+  alternating runs: 10,917 ms and 10,916 ms).
