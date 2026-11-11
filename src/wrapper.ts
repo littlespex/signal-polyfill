@@ -17,15 +17,18 @@
 
 import {
   WATCHER,
-  assertNotFrozen,
-  computedGet,
+  computedRead,
+  computedStale,
+  computing,
   createNode,
-  getComputing,
+  frozen,
+  refresh,
   setComputing,
   sinksOf,
   sourcesOf,
   stateGet,
   stateSet,
+  throwFrozen,
   watcherPending,
   watcherUnwatch,
   watcherWatch,
@@ -47,12 +50,9 @@ export namespace Signal {
 
   // Options are read once, at construction. A falsy option counts as absent.
   function applyOptions<T>(node: Node, options: Signal.Options<T>): void {
-    const equals = options.equals;
-    if (equals) node.equals = equals;
-    const watched = options[Signal.subtle.watched];
-    if (watched) node.watched = watched;
-    const unwatched = options[Signal.subtle.unwatched];
-    if (unwatched) node.unwatched = unwatched;
+    node.equals = options.equals || undefined;
+    node.watched = options[Signal.subtle.watched] || undefined;
+    node.unwatched = options[Signal.subtle.unwatched] || undefined;
   }
 
   // A read-write Signal
@@ -97,7 +97,12 @@ export namespace Signal {
     }
 
     get(): T {
-      return computedGet(this.#node) as T;
+      const node = this.#node;
+      // `refresh` is called from here, not from a function in between: every
+      // frame between two callbacks shortens the longest chain of computeds
+      // the stack can hold.
+      if (computedStale(node)) refresh(node);
+      return computedRead(node) as T;
     }
   }
 
@@ -109,13 +114,13 @@ export namespace Signal {
   function signalNode(signal: unknown, caller: string): Node {
     if (isState(signal)) return stateNode(signal);
     if (isComputed(signal)) return computedNode(signal);
-    throw new TypeError(`Called ${caller} without a Computed or State argument`);
+    throw new TypeError(`${caller}: not a Computed or State`);
   }
 
   function sinkNode(sink: unknown, caller: string): Node {
     if (isComputed(sink)) return computedNode(sink);
     if (isWatcher(sink)) return watcherNode(sink);
-    throw new TypeError(`Called ${caller} without a Computed or Watcher argument`);
+    throw new TypeError(`${caller}: not a Computed or Watcher`);
   }
 
   // eslint-disable-next-line @typescript-eslint/no-namespace
@@ -174,7 +179,7 @@ export namespace Signal {
       // the notify callback will be invoked again.
       watch(...signals: AnySignal[]): void {
         const node = this.#node;
-        assertNotFrozen();
+        if (frozen) throwFrozen();
         watcherWatch(
           node,
           signals.map((signal) => signalNode(signal, 'watch')),
@@ -184,7 +189,7 @@ export namespace Signal {
       // Remove these signals from the watched set (e.g., for an effect which is disposed)
       unwatch(...signals: AnySignal[]): void {
         const node = this.#node;
-        assertNotFrozen();
+        if (frozen) throwFrozen();
         watcherUnwatch(
           node,
           signals.map((signal) => signalNode(signal, 'unwatch')),
@@ -199,7 +204,7 @@ export namespace Signal {
     }
 
     export function currentComputed(): Computed<any> | undefined {
-      return getComputing()?.wrapper as Computed<any> | undefined;
+      return computing?.wrapper as Computed<any> | undefined;
     }
 
     // Hooks to observe being watched or no longer watched

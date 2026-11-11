@@ -29,7 +29,7 @@
  *   by comparing versions per edge instead, so one STALE flag is enough.
  * - "Recalculate" step 1 clears the sources before the run. Here links are
  *   kept, and the ones not read again are dropped after the run, so a source
- *   that stays in use sees no `unwatched`/`watched` pair (`recompute`).
+ *   that stays in use sees no `unwatched`/`watched` pair (`refresh`).
  * - `equals` runs while `computing` is still the computed, so signals it reads
  *   become that computed's sources. A State's `equals` that throws makes
  *   `set` throw and leaves the value unchanged.
@@ -51,25 +51,38 @@
  *   computing: tests/Signal/subtle/currentComputed.test.ts expects that.
  */
 
-/** Live computed only: a (recursive) source was set since the last validation. */
-const STALE = 1 << 0;
-/** The computed is being validated or its callback is running. Reading it now is a cycle. */
-const COMPUTING = 1 << 1;
-/** Computed only: its source links are on their sources' sink lists. */
-const LIVE = 1 << 2;
-/** `value` holds a thrown exception, to be rethrown on read. */
-const HAS_ERROR = 1 << 3;
-export const WATCHER = 1 << 4;
-/** Watcher states. Neither bit set is the text's `waiting`. */
-const WATCHING = 1 << 5;
-const PENDING = 1 << 6;
 /**
- * A State was set while the computed last ran, or it read a computed in this
- * state, so its value is trusted for the generation in `validatedAt` only.
- * Unlike STALE it does not make the computed pending, and it applies whether
- * or not the computed is live.
+ * Bits of `Node.flags`. A `const enum`, so that each use compiles to a number
+ * instead of a variable lookup: the read path is small enough for that to show.
  */
-const UNSETTLED = 1 << 7;
+const enum Flag {
+  /** Live computed only: a (recursive) source was set since the last validation. */
+  STALE = 1 << 0,
+  /** The computed is being validated or its callback is running. Reading it now is a cycle. */
+  COMPUTING = 1 << 1,
+  /** Computed only: its source links are on their sources' sink lists. */
+  LIVE = 1 << 2,
+  /** `value` holds a thrown exception, to be rethrown on read. */
+  HAS_ERROR = 1 << 3,
+  WATCHER = 1 << 4,
+  /**
+   * The Watcher is the text's `watching`; without the bit it is `waiting`.
+   * `pending` lasts only while `notify` callbacks run, when the graph is frozen
+   * and nothing can tell it from `waiting`, so it has no bit. A Watcher whose
+   * last signal was unwatched keeps the bit: nothing can reach it until the
+   * next `watch`, which sets the bit anyway.
+   */
+  WATCHING = 1 << 5,
+  /**
+   * A State was set while the computed last ran, or it read a computed in this
+   * state, so its value is trusted for the generation in `validatedAt` only.
+   * Unlike STALE it does not make the computed pending, and it applies whether
+   * or not the computed is live.
+   */
+  UNSETTLED = 1 << 6,
+}
+
+export const WATCHER = Flag.WATCHER;
 
 /** `Link.version` of a source that the running computed has not read again yet. */
 const UNREAD = -1;
@@ -116,9 +129,9 @@ interface Link {
 }
 
 /** The text's `computing`. */
-let computing: Node | undefined;
+export let computing: Node | undefined;
 /** The text's `frozen`. */
-let frozen = false;
+export let frozen = false;
 /** The text's `generation`: counts effective `State.set` calls. */
 let generation = 0;
 let walkId = 0;
@@ -135,8 +148,12 @@ let hookErrors: unknown[] | undefined;
  * the UNSETTLED computeds it has read so far, or Infinity if it read none.
  */
 let trustLimit = Infinity;
-const walkStack: (Link | undefined)[] = [];
-const liveStack: (Link | undefined)[] = [];
+/** Links still to visit, for `propagate`, `attach` and `detach`. None of them runs while another is walking. */
+const stack: (Link | undefined)[] = [];
+/** Outcomes of running a computed's callback. */
+const NEW_VALUE = 0;
+const SAME_VALUE = 1;
+const THREW = 2;
 /** How often `refresh` re-checks sources when callbacks keep setting States while it checks. */
 const MAX_RECHECKS = 100;
 
@@ -166,24 +183,15 @@ export function createNode(
   };
 }
 
-export function getComputing(): Node | undefined {
-  return computing;
-}
-
+/** Sets `computing` and returns what it was. `untrack` calls this itself, so that it adds one stack frame, not two. */
 export function setComputing(node: Node | undefined): Node | undefined {
   const prev = computing;
   computing = node;
   return prev;
 }
 
-export function assertNotFrozen(): void {
-  if (frozen) throwFrozen();
-}
-
-function throwFrozen(): never {
-  throw new Error(
-    'Signals cannot be read, written or watched inside a notify, watched or unwatched callback',
-  );
+export function throwFrozen(): never {
+  throw new Error('Signals cannot be used in a notify, watched or unwatched callback');
 }
 
 function takeErrors(errors: unknown[]): unknown {
@@ -200,21 +208,35 @@ export function stateGet(node: Node): unknown {
   return node.value;
 }
 
-export function computedGet(node: Node): unknown {
+/**
+ * `Computed.get` comes in two halves, with `refresh` between them when the
+ * first half asks for it. `Computed.prototype.get` makes the three calls
+ * itself, so that a computed read from a callback costs one frame on the
+ * stack before `refresh`, not two: that is what limits how long a chain of
+ * computeds can be.
+ *
+ * This half does the checks. It returns true if the value may be out of date.
+ */
+export function computedStale(node: Node): boolean {
   if (frozen) throwFrozen();
   const flags = node.flags;
-  if (flags & COMPUTING) throw new Error('Cycle detected: a Computed read itself while computing');
+  if (flags & Flag.COMPUTING) throw new Error('Cycle detected');
   // A live computed that is neither STALE nor UNSETTLED is current. Anything
   // else is current only if nothing was set since it was last validated.
-  if ((flags & (LIVE | STALE | UNSETTLED)) !== LIVE && node.validatedAt !== generation) {
-    refresh(node);
-  }
+  return (
+    (flags & (Flag.LIVE | Flag.STALE | Flag.UNSETTLED)) !== Flag.LIVE &&
+    node.validatedAt !== generation
+  );
+}
+
+/** The second half of `Computed.get`: records the read and returns the value or throws the cached error. */
+export function computedRead(node: Node): unknown {
   track(node);
   const after = node.flags;
-  if (after & (HAS_ERROR | UNSETTLED)) {
+  if (after & (Flag.HAS_ERROR | Flag.UNSETTLED)) {
     // Whoever is reading can trust its own result no longer than this value.
-    if (after & UNSETTLED && node.validatedAt < trustLimit) trustLimit = node.validatedAt;
-    if (after & HAS_ERROR) throw node.value;
+    if (after & Flag.UNSETTLED && node.validatedAt < trustLimit) trustLimit = node.validatedAt;
+    if (after & Flag.HAS_ERROR) throw node.value;
   }
   return node.value;
 }
@@ -263,7 +285,7 @@ function addSource(source: Node, sink: Node, rollback: Link | undefined): void {
   else sink.sources = link;
   sink.sourcesTail = link;
   source.active = link;
-  if (sink.flags & LIVE) attach(link);
+  if (sink.flags & Flag.LIVE) attach(link);
 }
 
 // ---------------------------------------------------------------------------
@@ -286,129 +308,162 @@ function addSource(source: Node, sink: Node, rollback: Link | undefined): void {
  *   set anywhere a read checks it again, watched or not.
  * - A computed that read an UNSETTLED one is UNSETTLED too, with the same
  *   limit, so the two are checked again together.
+ *
+ * The check and the run are one function, and its locals are few and reused,
+ * on purpose. A chain of computeds that each read the previous one nests one
+ * call of this function per level (plus `Computed.prototype.get` and the
+ * callback), and the engine's stack is what limits the length of such a
+ * chain. Before a function is optimized, every local, every nested function
+ * call and every `try` costs stack at each level.
  */
-function refresh(node: Node): void {
+export function refresh(node: Node): void {
   // Busy for the whole check, not only while the callback runs: a source that
   // reads this node back at any point is a cycle.
-  node.flags |= COMPUTING;
+  node.flags |= Flag.COMPUTING;
   const outerLimit = trustLimit;
-  let settled = false;
   try {
-    for (let pass = 0; ; pass++) {
-      const start = generation;
+    // How often the sources are checked again because a callback set a State
+    // while they were being checked. 0 once the node itself has run.
+    let rechecks = MAX_RECHECKS;
+    let start: number;
+    do {
+      start = generation;
       trustLimit = Infinity;
-      let dirty = node.version === 0;
-      for (let link = node.sources; !dirty && link !== undefined; link = link.nextSource) {
-        const source = link.source;
-        if (source.fn !== undefined) {
-          const flags = source.flags;
-          // A busy source means a cycle: rerun, so that the read throws.
-          if (flags & COMPUTING) dirty = true;
-          else {
+      // Stop at the first source that changed. A node that never ran has
+      // nothing to check.
+      let link = node.sources;
+      // The source being checked and, once the callback runs, the computed
+      // that was running before this one. One local for the two, see above.
+      let other: Node | undefined;
+      if (node.version !== 0) {
+        for (; link !== undefined; link = link.nextSource) {
+          other = link.source;
+          if (other.fn !== undefined) {
+            // A busy source means a cycle: rerun, so that the read throws.
+            if (other.flags & Flag.COMPUTING) break;
             if (
-              (flags & (LIVE | STALE | UNSETTLED)) !== LIVE &&
-              source.validatedAt !== generation
+              (other.flags & (Flag.LIVE | Flag.STALE | Flag.UNSETTLED)) !== Flag.LIVE &&
+              other.validatedAt !== generation
             ) {
-              refresh(source);
+              refresh(other);
             }
-            if (source.flags & UNSETTLED && source.validatedAt < trustLimit) {
-              trustLimit = source.validatedAt;
+            if (other.flags & Flag.UNSETTLED && other.validatedAt < trustLimit) {
+              trustLimit = other.validatedAt;
             }
           }
+          if (link.version !== other.version) break;
         }
-        if (link.version !== source.version) dirty = true;
       }
-      if (dirty) recompute(node);
-      if (generation === start) {
-        // Nothing was set. The result still cannot outlast an UNSETTLED source.
-        settled = trustLimit === Infinity;
-        break;
+      if (link !== undefined || node.version === 0) {
+        // Run the callback. First point each source at this node's link so
+        // `track` can find it, and mark every link UNREAD. Whatever is still
+        // UNREAD afterwards is dropped.
+        for (link = node.sources; link !== undefined; link = link.nextSource) {
+          link.rollback = link.source.active;
+          link.source.active = link;
+          link.version = UNREAD;
+        }
+
+        other = computing;
+        const prevHookErrors = hookErrors;
+        computing = node;
+        hookErrors = undefined;
+
+        let value: unknown;
+        // What the run produced: a new value, an exception, or a value equal
+        // to the one the computed already had.
+        let outcome = NEW_VALUE;
+        try {
+          value = node.fn!.call(node.wrapper);
+          // `equals` runs before `computing` is restored, so signals it reads
+          // become sources of this computed. It is not called on the first run
+          // or when the previous run threw: there is no old value to compare.
+          if (node.version !== 0 && !(node.flags & Flag.HAS_ERROR) && unchanged(node, value)) {
+            outcome = SAME_VALUE;
+          }
+        } catch (error) {
+          value = error;
+          outcome = THREW;
+        }
+        computing = other;
+
+        // Two loops. The first one makes no call, so it finishes even when the
+        // stack is almost used up: every source gets its `active` back. The
+        // second one drops the links that were not read again. A call can
+        // throw a RangeError there; the links that are still UNREAD then count
+        // as changed, so the next read reruns the callback and drops them.
+        for (link = node.sources; link !== undefined; link = link.nextSource) {
+          link.source.active = link.rollback;
+          link.rollback = undefined;
+        }
+        // A dropped link keeps its own `nextSource`, so the loop can step past it.
+        for (link = node.sources; link !== undefined; link = link.nextSource) {
+          if (link.version === UNREAD) removeSource(node, link);
+        }
+
+        // A `watched`/`unwatched` callback that threw because of this run's
+        // reads becomes the computed's value, like any other error raised by
+        // the run.
+        if (hookErrors !== undefined) {
+          value = takeErrors(hookErrors);
+          outcome = THREW;
+        }
+        hookErrors = prevHookErrors;
+
+        node.flags = outcome === THREW ? node.flags | Flag.HAS_ERROR : node.flags & ~Flag.HAS_ERROR;
+        if (outcome !== SAME_VALUE) {
+          node.value = value;
+          node.version++;
+        }
+        rechecks = 0;
       }
-      // A State was set during this pass.
-      if (dirty || pass === MAX_RECHECKS) break;
-    }
-    if (settled) {
+      // Again only if a State was set during this pass and the node did not run.
+    } while (generation !== start && rechecks-- !== 0);
+    if (generation === start && trustLimit === Infinity) {
+      // Nothing was set, and no source is UNSETTLED.
       node.validatedAt = generation;
-      node.flags &= ~(STALE | UNSETTLED);
+      node.flags &= ~(Flag.STALE | Flag.UNSETTLED);
     } else {
+      // The result cannot outlast an UNSETTLED source, or the set.
       node.validatedAt = trustLimit < generation ? trustLimit : generation;
-      node.flags = (node.flags & ~STALE) | UNSETTLED;
+      node.flags = (node.flags & ~Flag.STALE) | Flag.UNSETTLED;
       // This node may sit below computeds that a walk marked during the run.
       // It is not STALE itself, so no walk may stop above it: see `propagate`.
       armMark = walkId;
     }
-  } finally {
-    // In `finally` so that a stack overflow far below cannot leave the node busy.
-    node.flags &= ~COMPUTING;
+  } catch (error) {
+    // A stack overflow far below must not leave the node busy. Not a
+    // `finally`, which would cost three more stack slots at each level; the
+    // try block has no other way out than its end or a throw.
+    node.flags &= ~Flag.COMPUTING;
     trustLimit = outerLimit;
+    throw error;
   }
+  node.flags &= ~Flag.COMPUTING;
+  trustLimit = outerLimit;
 }
 
-function recompute(node: Node): void {
-  // Point each source at this node's link so `track` can find it, and mark
-  // every link UNREAD. Whatever is still UNREAD afterwards is dropped.
-  for (let link = node.sources; link !== undefined; link = link.nextSource) {
-    const source = link.source;
-    link.rollback = source.active;
-    source.active = link;
-    link.version = UNREAD;
-  }
+/** Whether `value` equals the node's current value, by its `equals` option or `Object.is`. */
+function unchanged(node: Node, value: unknown): boolean {
+  const equals = node.equals;
+  return equals === undefined
+    ? Object.is(node.value, value)
+    : equals.call(node.wrapper, node.value, value);
+}
 
-  const prevComputing = computing;
-  const prevHookErrors = hookErrors;
-  computing = node;
-  hookErrors = undefined;
-
-  let value: unknown;
-  let failed = false;
-  let changed = true;
-  try {
-    value = node.fn!.call(node.wrapper);
-    // `equals` runs before `computing` is restored, so signals it reads become
-    // sources of this computed. It is not called on the first run or when the
-    // previous run threw: there is no old value to compare.
-    if (node.version !== 0 && !(node.flags & HAS_ERROR)) {
-      const equals = node.equals;
-      changed = !(equals === undefined
-        ? Object.is(node.value, value)
-        : equals.call(node.wrapper, node.value, value));
-    }
-  } catch (error) {
-    value = error;
-    failed = true;
-  }
-  computing = prevComputing;
-
-  let link = node.sources;
-  while (link !== undefined) {
-    const next = link.nextSource;
-    link.source.active = link.rollback;
-    link.rollback = undefined;
-    if (link.version === UNREAD) {
-      const prev = link.prevSource;
-      if (prev !== undefined) prev.nextSource = next;
-      else node.sources = next;
-      if (next !== undefined) next.prevSource = prev;
-      else node.sourcesTail = prev;
-      if (node.flags & LIVE) detach(link);
-    }
-    link = next;
-  }
-
-  // A `watched`/`unwatched` callback that threw because of this run's reads
-  // becomes the computed's value, like any other error raised by the run.
-  if (hookErrors !== undefined) {
-    value = takeErrors(hookErrors);
-    failed = true;
-    changed = true;
-  }
-  hookErrors = prevHookErrors;
-
-  node.flags = failed ? node.flags | HAS_ERROR : node.flags & ~HAS_ERROR;
-  if (changed) {
-    node.value = value;
-    node.version++;
-  }
+/**
+ * Takes `link` off `sink`'s source list and, if the sink is live or a Watcher,
+ * off its source's sink list. The link's own `nextSource` is left as it was,
+ * so a loop over the list can step past a link it just removed.
+ */
+function removeSource(sink: Node, link: Link): void {
+  const prev = link.prevSource;
+  const next = link.nextSource;
+  if (prev !== undefined) prev.nextSource = next;
+  else sink.sources = next;
+  if (next !== undefined) next.prevSource = prev;
+  else sink.sourcesTail = prev;
+  if (sink.flags & (Flag.LIVE | Flag.WATCHER)) detach(link);
 }
 
 // ---------------------------------------------------------------------------
@@ -452,23 +507,23 @@ function propagate(source: Node): void {
       const sink = link.sink;
       link = link.nextSink;
       const flags = sink.flags;
-      if (flags & WATCHER) {
-        if (flags & WATCHING) {
-          sink.flags = flags ^ (WATCHING | PENDING);
+      if (flags & Flag.WATCHER) {
+        if (flags & Flag.WATCHING) {
+          sink.flags = flags ^ Flag.WATCHING;
           (queue ??= []).push(sink);
         }
-      } else if (!(flags & STALE) || sink.mark <= armMark) {
-        sink.flags = flags | STALE;
+      } else if (!(flags & Flag.STALE) || sink.mark <= armMark) {
+        sink.flags = flags | Flag.STALE;
         sink.mark = id;
         if (sink.sinks !== undefined) {
-          if (link !== undefined) walkStack[top++] = link;
+          if (link !== undefined) stack[top++] = link;
           link = sink.sinks;
         }
       }
     }
     if (top === 0) break;
-    link = walkStack[--top];
-    walkStack[top] = undefined;
+    link = stack[--top];
+    stack[top] = undefined;
   }
   if (queue !== undefined) notify(queue);
 }
@@ -484,7 +539,6 @@ function notify(queue: Node[]): void {
       (errors ??= []).push(error);
     }
     frozen = false;
-    watcher.flags &= ~PENDING;
   }
   if (errors !== undefined) throw takeErrors(errors);
 }
@@ -518,11 +572,11 @@ function attach(root: Link): void {
         // happened while it was not live did not. Unless it was validated in
         // this very generation, it has to be checked on its next read. No
         // walk has covered what is below it now, hence the reset of `mark`.
-        source.flags |= source.validatedAt === generation ? LIVE : LIVE | STALE;
+        source.flags |= source.validatedAt === generation ? Flag.LIVE : Flag.LIVE | Flag.STALE;
         source.mark = 0;
         const first = source.sources;
         if (first !== undefined) {
-          liveStack[top++] = link;
+          stack[top++] = link;
           link = first;
           continue;
         }
@@ -541,8 +595,8 @@ function attach(root: Link): void {
         link = next;
         break;
       }
-      link = liveStack[--top]!;
-      liveStack[top] = undefined;
+      link = stack[--top]!;
+      stack[top] = undefined;
       if (link.source.watched !== undefined) (hooks ??= []).push(link.source);
     }
   }
@@ -570,11 +624,11 @@ function detach(root: Link): void {
       if (source.fn !== undefined) {
         // A live computed without STALE is current as of now. Record that in
         // the form unwatched computeds use.
-        if (!(source.flags & (STALE | UNSETTLED))) source.validatedAt = generation;
-        source.flags &= ~(LIVE | STALE);
+        if (!(source.flags & (Flag.STALE | Flag.UNSETTLED))) source.validatedAt = generation;
+        source.flags &= ~(Flag.LIVE | Flag.STALE);
         const first = source.sources;
         if (first !== undefined) {
-          liveStack[top++] = link;
+          stack[top++] = link;
           link = first;
           continue;
         }
@@ -591,8 +645,8 @@ function detach(root: Link): void {
         link = nextSource;
         break;
       }
-      link = liveStack[--top]!;
-      liveStack[top] = undefined;
+      link = stack[--top]!;
+      stack[top] = undefined;
       if (link.source.unwatched !== undefined) (hooks ??= []).push(link.source);
     }
   }
@@ -662,7 +716,7 @@ export function watcherWatch(watcher: Node, signals: readonly Node[]): void {
       attach(link);
     }
   }
-  if (!(watcher.flags & (WATCHING | PENDING))) watcher.flags |= WATCHING;
+  watcher.flags |= Flag.WATCHING;
   armMark = walkId;
   finishHooks(outerErrors);
 }
@@ -670,7 +724,7 @@ export function watcherWatch(watcher: Node, signals: readonly Node[]): void {
 export function watcherUnwatch(watcher: Node, signals: readonly Node[]): void {
   for (let i = 0; i < signals.length; i++) {
     if (findWatcherLink(signals[i], watcher) === undefined) {
-      throw new Error('Called unwatch with a signal that this Watcher is not watching');
+      throw new Error('unwatch: signal is not watched by this Watcher');
     }
   }
   const outerErrors = hookErrors;
@@ -678,26 +732,17 @@ export function watcherUnwatch(watcher: Node, signals: readonly Node[]): void {
   for (let i = 0; i < signals.length; i++) {
     const link = findWatcherLink(signals[i], watcher);
     // Undefined when the same signal was passed twice.
-    if (link !== undefined) {
-      const prev = link.prevSource;
-      const next = link.nextSource;
-      if (prev !== undefined) prev.nextSource = next;
-      else watcher.sources = next;
-      if (next !== undefined) next.prevSource = prev;
-      else watcher.sourcesTail = prev;
-      detach(link);
-    }
+    if (link !== undefined) removeSource(watcher, link);
   }
-  if (watcher.sources === undefined) watcher.flags &= ~WATCHING;
   finishHooks(outerErrors);
 }
 
-/** Watched computeds that may be out of date, in watch order. */
+/** Watched computeds that may be out of date, in watch order. Only a computed is ever STALE. */
 export function watcherPending(watcher: Node): object[] {
   const pending: object[] = [];
   for (let link = watcher.sources; link !== undefined; link = link.nextSource) {
     const source = link.source;
-    if (source.fn !== undefined && source.flags & STALE) pending.push(source.wrapper);
+    if (source.flags & Flag.STALE) pending.push(source.wrapper);
   }
   return pending;
 }
