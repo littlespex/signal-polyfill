@@ -8,6 +8,8 @@ const entry = join(dirname(fileURLToPath(import.meta.url)), './src/index.ts');
 export default defineConfig({
   plugins: [dts()],
   build: {
+    // Private fields and static blocks are the internal slots; keep them native.
+    target: 'es2022',
     minify: false,
     lib: {
       entry,
